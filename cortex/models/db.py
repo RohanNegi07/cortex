@@ -28,17 +28,14 @@ async def init_db():
         print("[OK] Database pool initialized")
         return True
     except Exception as e:
-        print(f"[WARN] Database connection failed (dev mode): {e}")
+        print(f"[WARN] Database connection failed: {e}")
         print("")
         print("Troubleshooting:")
         print("1. Check Postgres is running: docker ps | grep cortex-db")
         print("2. Start Docker container: docker start cortex-db")
         print("3. Verify DATABASE_URL in .env")
         print("")
-        print("Continuing in stub mode for testing...")
-        # In development, we allow the service to start without DB
-        # Real endpoints will fail, but health check will work
-        return True
+        return False
 
 async def close_db():
     """Close the database connection pool"""
@@ -56,8 +53,11 @@ async def get_connection():
 
 async def release_connection(conn):
     """Release a connection back to the pool."""
-    if _pool and conn is not None:
-        await release_connection(conn)
+    if _pool is not None and conn is not None:
+        try:
+            await _pool.release(conn)
+        except Exception:
+            pass  # already released or pool closed — safe to ignore
 
 async def normalize_project_id(project_id: str) -> Optional[str]:
     """Normalize an incoming project identifier to the internal project UUID."""
@@ -156,7 +156,7 @@ async def ingest_meeting_insights(
         )
         return {"id": str(insight_id), "inserted": True, "action": "created"}
     finally:
-        await release_connection(conn)
+        await _pool.release(conn)
 
 async def get_meeting_insights(project_id: str, limit: int = 10) -> List[Dict[str, Any]]:
     """Get recent meetings for a project"""
@@ -173,7 +173,7 @@ async def get_meeting_insights(project_id: str, limit: int = 10) -> List[Dict[st
         )
         return [dict(row) for row in rows]
     finally:
-        await release_connection(conn)
+        await _pool.release(conn)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # QUERIES: HEALTH SCORES
@@ -201,7 +201,7 @@ async def insert_health_score(
         )
         return str(score_id)
     finally:
-        await release_connection(conn)
+        await _pool.release(conn)
 
 async def get_latest_health_score(project_id: str) -> Optional[Dict[str, Any]]:
     """Get the most recent health score for a project"""
@@ -218,7 +218,7 @@ async def get_latest_health_score(project_id: str) -> Optional[Dict[str, Any]]:
         )
         return dict(row) if row else None
     finally:
-        await release_connection(conn)
+        await _pool.release(conn)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # QUERIES: PROJECT MEMORY
@@ -250,7 +250,7 @@ async def get_or_create_project_memory(project_id: str) -> Dict[str, Any]:
             "recent_context": {"meetings": []},
         }
     finally:
-        await release_connection(conn)
+        await _pool.release(conn)
 
 async def update_project_memory(
     project_id: str,
@@ -280,7 +280,7 @@ async def update_project_memory(
         )
         return True
     finally:
-        await release_connection(conn)
+        await _pool.release(conn)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SCHEMA INITIALIZATION
@@ -334,7 +334,8 @@ CREATE TABLE IF NOT EXISTS project_milestones (
     current_due_date DATE NOT NULL,
     status TEXT CHECK (status IN ('not_started','in_progress','at_risk','completed','missed')) DEFAULT 'not_started',
     completed_date DATE,
-    created_at TIMESTAMPTZ DEFAULT NOW()
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(project_id, name)
 );
 
 -- ─────────────────────────────────────────────────────────────────────────
@@ -510,16 +511,53 @@ async def init_schema():
         print("[WARN] No database connection. Skipping schema init.")
         return True
 
-    conn = await get_connection()
+    conn = await _pool.acquire()
     try:
-        # Check if pgvector extension is available
+        # Try pgvector — if not available, strip the vector column and index
+        pgvector_ok = False
         try:
             await conn.execute("CREATE EXTENSION IF NOT EXISTS vector;")
+            pgvector_ok = True
         except Exception as e:
-            print(f"[WARN] pgvector extension not available: {e}")
+            print(f"[WARN] pgvector not available: {e}")
+            print("[INFO] Continuing without vector search — embeddings will be disabled.")
 
-        # Create schema
-        await conn.execute(SCHEMA_SQL)
+        # Build schema SQL — strip vector parts if pgvector not installed
+        schema_sql = SCHEMA_SQL
+        if not pgvector_ok:
+            # Remove the vector column and ivfflat index so schema still creates cleanly
+            schema_sql = "\n".join(
+                line for line in schema_sql.splitlines()
+                if "vector" not in line.lower() and "ivfflat" not in line.lower()
+            )
+
+        await conn.execute(schema_sql)
+
+        # Deduplicate existing project milestone rows and enforce one milestone name per project
+        await conn.execute("""
+            DELETE FROM project_milestones a
+            USING project_milestones b
+            WHERE a.project_id = b.project_id
+              AND a.name = b.name
+              AND a.id > b.id;
+        """)
+        await conn.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_project_milestones_project_name
+            ON project_milestones(project_id, name);
+        """)
+
+        # Ensure project_memory schema upgrades for older databases
+        await conn.execute("""
+            ALTER TABLE project_memory
+                ADD COLUMN IF NOT EXISTS recent_context JSONB,
+                ADD COLUMN IF NOT EXISTS relationship_trajectory JSONB,
+                ADD COLUMN IF NOT EXISTS sentiment_history JSONB,
+                ADD COLUMN IF NOT EXISTS risk_register JSONB,
+                ADD COLUMN IF NOT EXISTS blocker_log JSONB,
+                ADD COLUMN IF NOT EXISTS milestone_status JSONB,
+                ADD COLUMN IF NOT EXISTS previous_meeting_ref JSONB;
+        """)
+
         print("[OK] Database schema initialized")
         return True
     except Exception as e:
@@ -527,4 +565,4 @@ async def init_schema():
         print("Continuing in stub mode...")
         return True
     finally:
-        await release_connection(conn)
+        await _pool.release(conn)

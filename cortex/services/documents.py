@@ -11,7 +11,7 @@ from typing import Optional, Dict, Any
 
 from cortex.config import GROQ_API_KEY, GROQ_MODEL
 from cortex.models.schemas import DocumentRequest, DocumentResponse
-from cortex.models.db import get_connection
+from cortex.models.db import get_connection, release_connection, normalize_project_id
 from cortex.integrations.r2 import get_r2_client
 from cortex.services.templates import load_template
 
@@ -188,3 +188,69 @@ Fill the template now:"""
         version=1,
         generated_at=datetime.utcnow()
     )
+
+
+async def _validate_r2_key_prefix(external_project_id: str, internal_project_id: str, r2_key: str) -> None:
+    """Validate that the R2 key is in an expected project prefix."""
+    prefixes = [
+        f"projects/{internal_project_id}/",
+        f"projects/{external_project_id}/"
+    ]
+    if not any(r2_key.startswith(prefix) for prefix in prefixes):
+        raise ValueError(
+            "r2_key must begin with one of: " + ", ".join(prefixes)
+        )
+
+
+async def handle_document_upload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Persist an uploaded document record reported by the intranet.
+
+    Expected keys: project_id, document_type, r2_key, source (optional), uploader (optional)
+    Returns: dict with inserted document id and r2_key
+    """
+    project_id = payload.get("project_id")
+    doc_type = payload.get("document_type")
+    r2_key = payload.get("r2_key")
+    source = payload.get("source", "manual_upload")
+    uploader = payload.get("uploader")
+    extracted_data = payload.get("extracted_data")
+
+    if not project_id or not doc_type or not r2_key:
+        raise ValueError("project_id, document_type and r2_key are required")
+
+    # Normalize external project id to internal UUID
+    internal_project_id = await normalize_project_id(project_id)
+    if not internal_project_id:
+        raise ValueError(f"Project not found: {project_id}")
+
+    # Validate R2 path prefix to ensure the object belongs to the project
+    await _validate_r2_key_prefix(project_id, internal_project_id, r2_key)
+
+    # Verify R2 object exists before storing the record
+    r2 = get_r2_client()
+    object_data = await r2.get_object(r2_key)
+    if object_data is None:
+        raise ValueError(f"R2 object not found for r2_key: {r2_key}")
+
+    conn = await get_connection()
+    try:
+        doc_id = await conn.fetchval(
+            """
+            INSERT INTO project_documents (
+                project_id, doc_type, version, status, source, r2_key, extracted_data, notes, generated_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
+            RETURNING id
+            """,
+            internal_project_id,
+            doc_type,
+            "v1.0",
+            "uploaded",
+            source,
+            r2_key,
+            extracted_data if extracted_data is not None else {},
+            f"uploaded_by={uploader}" if uploader else None
+        )
+        log.info(f"Stored document for {project_id}: {doc_id}")
+        return {"id": str(doc_id), "r2_key": r2_key}
+    finally:
+        await release_connection(conn)

@@ -98,48 +98,6 @@ async def post_team_change(
             "message": f"Team change processed for {payload.project_id}"
         }
 
-        # Generate KT document if PM reassignment
-        kt_result = None
-        if payload.change_type == "pm_reassignment":
-            kt_result = await generate_kt_document(
-                project_id=payload.project_id,
-                outgoing_employee_id=payload.outgoing_employee_id,
-                incoming_employee_id=payload.incoming_employee_id,
-                effective_date=payload.effective_date
-            )
-
-            if not kt_result:
-                log.warning(f"KT document generation failed for {payload.project_id}")
-                return {
-                    "status": "error",
-                    "project_id": payload.project_id,
-                    "message": "Failed to generate KT document"
-                }
-
-        # Log team change
-        conn = await get_connection()
-        try:
-            await conn.execute(
-                """INSERT INTO agent_actions
-                   (project_id, action_type, payload, triggered_by, status)
-                   VALUES ($1, $2, $3, $4, $5)""",
-                payload.project_id,
-                f"team_change_{payload.change_type}",
-                f"outgoing={payload.outgoing_employee_id}, incoming={payload.incoming_employee_id}, effective={payload.effective_date}",
-                "webhook",
-                "success"
-            )
-        finally:
-            if conn:
-                await release_connection(conn)
-
-        response = {
-            "status": "ok",
-            "project_id": payload.project_id,
-            "change_type": payload.change_type,
-            "message": f"Team change processed for {payload.project_id}"
-        }
-
         if kt_result:
             response["kt_document"] = {
                 "document_id": kt_result.get("document_id"),

@@ -15,7 +15,7 @@ from datetime import datetime
 from cortex.config import CORTEX_HOST, CORTEX_PORT, CORTEX_ENV, CORTEX_API_KEY
 from cortex.models.db import init_db, close_db, init_schema
 from cortex.models.schemas import HealthCheckResponse
-from cortex.routers import nerve, chat, documents, slack, team_change
+from cortex.routers import nerve, chat, documents, slack, team, calibrate
 from cortex.scheduler import start_scheduler, stop_scheduler
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -121,7 +121,8 @@ app.include_router(nerve.router)
 app.include_router(chat.router)
 app.include_router(documents.router)
 app.include_router(slack.router)
-app.include_router(team_change.router)
+app.include_router(team.router)
+app.include_router(calibrate.router)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ROOT

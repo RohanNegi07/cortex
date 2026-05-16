@@ -6,20 +6,19 @@ risks, milestones, and recent context.
 
 import json
 import logging
+import re
 from typing import Optional, Dict, Any
 from datetime import datetime
 import asyncpg
 from cortex.models.db import get_connection, release_connection
-from cortex.config import ANTHROPIC_API_KEY, ANTHROPIC_MODEL
+from cortex.llm.client import get_async_anthropic_client, get_groq_client
+from cortex.llm.prompts.narrative import build_narrative_prompt
+from cortex.config import ANTHROPIC_MODEL, GROQ_MODEL
 
 log = logging.getLogger("cortex.narrative")
 
-try:
-    from anthropic import AsyncAnthropic
-    client = AsyncAnthropic(api_key=ANTHROPIC_API_KEY) if ANTHROPIC_API_KEY else None
-except Exception as e:
-    log.warning(f"Could not initialize AsyncAnthropic client: {e}")
-    client = None
+anthropic_client = get_async_anthropic_client()
+groq_client = get_groq_client()
 
 async def update_narrative(project_id: str) -> Optional[Dict[str, Any]]:
     """
@@ -45,57 +44,106 @@ async def update_narrative(project_id: str) -> Optional[Dict[str, Any]]:
         recent_context = json.loads(memory_row["recent_context"] or "{}")
 
         # 2. Build prompt
-        prompt = f"""
-You are a senior project manager analyzing a client engagement over time.
-Given the following data, produce a brief relationship trajectory analysis.
+        prompt = build_narrative_prompt(
+            sentiment_history=sentiment_history,
+            risk_register=risk_register,
+            milestone_status=milestone_status,
+            recent_meetings=recent_context.get("meetings", [])
+        )
 
-Sentiment History (last 6 meetings):
-{json.dumps(sentiment_history[-6:], indent=2)}
+        # 3. Call Claude or GROQ
+        def _extract_text(content_value):
+            if isinstance(content_value, str):
+                return content_value.strip()
+            if isinstance(content_value, (list, tuple)):
+                return "".join(
+                    getattr(block, "text", "")
+                    for block in content_value
+                    if getattr(block, "type", None) == "text"
+                ).strip()
+            return str(content_value).strip()
 
-Open Risks:
-{json.dumps([r for r in risk_register if r.get('status') == 'open'], indent=2)}
+        def _parse_json_text(text_value):
+            if not text_value:
+                return None
+            text_value = text_value.strip()
+            try:
+                return json.loads(text_value)
+            except json.JSONDecodeError:
+                cleaned = re.sub(r"```(?:json)?", "", text_value, flags=re.IGNORECASE).strip()
+                match = re.search(r"\{.*\}", cleaned, flags=re.DOTALL)
+                if match:
+                    candidate = match.group(0)
+                    try:
+                        return json.loads(candidate)
+                    except json.JSONDecodeError:
+                        pass
+                lines = [line.strip() for line in cleaned.splitlines() if line.strip()]
+                if lines and lines[0].startswith("{") and lines[-1].endswith("}"):
+                    candidate = "\n".join(lines)
+                    try:
+                        return json.loads(candidate)
+                    except json.JSONDecodeError:
+                        pass
+            return None
 
-Milestone Status:
-{json.dumps(milestone_status, indent=2)}
+        narrative = None
+        if anthropic_client:
+            try:
+                response = await anthropic_client.messages.create(
+                    model=ANTHROPIC_MODEL,
+                    max_tokens=300,
+                    messages=[
+                        {"role": "user", "content": prompt}
+                    ]
+                )
+                response_text = _extract_text(getattr(response, "content", []) or [])
+                if not response_text and hasattr(response, "content"):
+                    response_text = _extract_text(response.content)
+                if response_text:
+                    narrative = _parse_json_text(response_text)
+                    if narrative is None:
+                        narrative = {
+                            "trend": "stable",
+                            "narrative": response_text
+                        }
+            except Exception as e:
+                log.warning(f"Anthropic narrative failed: {e}")
 
-Recent Meeting Summaries:
-{json.dumps(recent_context.get('meetings', [])[:3], indent=2)}
+        if narrative is None and groq_client:
+            try:
+                response = groq_client.chat.completions.create(
+                    model=GROQ_MODEL,
+                    messages=[
+                        {"role": "system", "content": "You are a senior project manager analyzing a client engagement over time."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    max_tokens=1500,
+                    temperature=0.3
+                )
+                response_text = ""
+                if getattr(response, "choices", None):
+                    choice = response.choices[0]
+                    message = getattr(choice, "message", None)
+                    response_text = _extract_text(getattr(message, "content", None))
+                if not response_text:
+                    response_text = _extract_text(getattr(response, "text", None) or getattr(response, "content", None))
+                if response_text:
+                    narrative = _parse_json_text(response_text)
+                    if narrative is None:
+                        narrative = {
+                            "trend": "stable",
+                            "narrative": response_text
+                        }
+            except Exception as e:
+                log.warning(f"GROQ narrative failed: {e}")
 
-Output a JSON object with:
-{{
-    "trend": "improving" | "stable" | "declining",
-    "narrative": "2-3 sentences. Concrete. Reference specific dates and events."
-}}
-
-Be precise. Reference dates. Focus on actionable patterns.
-"""
-
-        # 3. Call Claude
-        if not ANTHROPIC_API_KEY:
-            log.warning("ANTHROPIC_API_KEY not configured. Using stub narrative.")
+        if narrative is None:
+            log.warning("Using stub narrative fallback.")
             narrative = {
                 "trend": "stable",
                 "narrative": "Project proceeding as planned."
             }
-        else:
-            client = AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
-            response = client.messages.create(
-                model=ANTHROPIC_MODEL,
-                max_tokens=300,
-                messages=[
-                    {"role": "user", "content": prompt}
-                ]
-            )
-            response_text = response.content[0].text
-            # Parse JSON from response
-            try:
-                narrative = json.loads(response_text)
-            except:
-                # Fallback if Claude doesn't return valid JSON
-                narrative = {
-                    "trend": "stable",
-                    "narrative": response_text[:200]
-                }
 
         # 4. Update project_memory
         trajectory = {
