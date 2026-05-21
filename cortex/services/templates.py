@@ -9,8 +9,6 @@ import asyncio
 from datetime import datetime, timedelta
 from typing import Optional
 
-from cortex.integrations.r2 import get_r2_client
-
 log = logging.getLogger("cortex.templates")
 
 TEMPLATE_CACHE = {}  # {doc_type: (content, loaded_at)}
@@ -29,24 +27,11 @@ async def load_template(doc_type: str) -> str:
             log.debug(f"Template {doc_type} loaded from cache")
             return content
 
-    # Load from R2
-    try:
-        r2 = get_r2_client()
-        template_key = f"templates/{doc_type}.md"
-
-        content_bytes = await r2.get_object(template_key)
-        if content_bytes:
-            content = content_bytes.decode("utf-8")
-            TEMPLATE_CACHE[doc_type] = (content, datetime.utcnow())
-            log.info(f"Loaded template {doc_type} from R2")
-            return content
-        else:
-            log.warning(f"Template {doc_type} not found in R2, using hardcoded fallback")
-    except Exception as e:
-        log.warning(f"Failed to load template {doc_type} from R2: {e}. Using hardcoded fallback.")
-
-    # Fallback to hardcoded
-    return get_hardcoded_template(doc_type)
+    # Load from hardcoded templates only
+    content = get_hardcoded_template(doc_type)
+    TEMPLATE_CACHE[doc_type] = (content, datetime.utcnow())
+    log.info(f"Loaded hardcoded template {doc_type}")
+    return content
 
 
 def get_hardcoded_template(doc_type: str) -> str:

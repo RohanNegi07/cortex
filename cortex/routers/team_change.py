@@ -15,7 +15,7 @@ from cortex.services.kt import generate_kt_document
 
 log = logging.getLogger("cortex.routers.team_change")
 
-router = APIRouter(prefix="/cortex", tags=["team-change"])
+router = APIRouter(prefix="/cortex/team", tags=["team"])
 
 
 class TeamChangePayload(BaseModel):
@@ -26,7 +26,7 @@ class TeamChangePayload(BaseModel):
     effective_date: str
 
 
-@router.post("/team-change")
+@router.post("/change")
 async def post_team_change(
     payload: TeamChangePayload,
     x_api_key: str = Header(None)

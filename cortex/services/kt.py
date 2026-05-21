@@ -10,7 +10,6 @@ from typing import Optional, Dict, Any
 
 from cortex.config import ANTHROPIC_API_KEY, ANTHROPIC_MODEL
 from cortex.models.db import get_connection, release_connection
-from cortex.integrations.r2 import get_r2_client
 from cortex.integrations.intranet import resolve_employee_details, resolve_project_details
 from cortex.services.slack_notifier import send_document_ready
 from cortex.llm.prompts.kt import build_kt_prompt
@@ -167,7 +166,7 @@ async def generate_kt_document(
                     response = claude_client.messages.create(
                         model=ANTHROPIC_MODEL,
                         max_tokens=3000,
-                        system_prompt="You are a senior project documentation specialist. Generate comprehensive markdown KT documents.",
+                        system="You are a senior project documentation specialist. Generate comprehensive markdown KT documents.",
                         messages=[{"role": "user", "content": prompt}]
                     )
                     kt_content = response.content[0].text
@@ -201,16 +200,8 @@ async def generate_kt_document(
 4. Review project memory and decisions
 """
 
-            # Upload to R2
-            r2 = get_r2_client()
             filename = f"kt_document_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.md"
-            r2_key = await r2.upload_document(
-                project_id=project_id,
-                doc_type="kt_document",
-                filename=filename,
-                content=kt_content.encode("utf-8"),
-                version="v1.0"
-            )
+            document_path = f"generated/{project_id}/{filename}"
 
             # Insert project_documents
             doc_id = f"kt_{project_id}_{datetime.utcnow().strftime('%Y%m%d')}"
@@ -223,7 +214,7 @@ async def generate_kt_document(
                 "v1.0",
                 "draft",
                 "generated",
-                r2_key
+                document_path
             )
 
             # Send to incoming PM via Slack
@@ -233,7 +224,7 @@ async def generate_kt_document(
                     slack_posted = await send_document_ready(
                         project_id=external_project_id,
                         doc_type="kt_document",
-                        r2_url=f"https://r2.example.com/{r2_key}",
+                        r2_url=f"https://cortex.example.com/{document_path}",
                         pm_email=incoming_pm.get("email")
                     )
                 except Exception as e:
@@ -255,7 +246,7 @@ async def generate_kt_document(
                 "status": "ok",
                 "project_id": project_id,
                 "document_id": doc_id,
-                "r2_url": r2_key,
+                "r2_url": f"https://cortex.example.com/{document_path}",
                 "slack_posted": slack_posted
             }
 

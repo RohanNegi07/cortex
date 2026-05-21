@@ -1,6 +1,6 @@
 """
 CORTEX Ingest Service (Step 1)
-Downloads insights.yaml from R2, parses, validates, embeds, and stores in DB.
+Accepts direct Nerve insights payloads, parses, validates, embeds, and stores in DB.
 """
 
 import json
@@ -8,9 +8,14 @@ import logging
 from typing import Optional, Dict, Any
 from datetime import datetime, date
 import asyncpg
-from cortex.models.db import get_connection, insert_health_score, release_connection
+from cortex.models.db import (
+    get_connection,
+    insert_health_score,
+    release_connection,
+    normalize_project_id,
+    create_or_get_project,
+)
 from cortex.models.schemas import InsightsYAML
-from cortex.integrations.r2 import get_r2_client
 from cortex.config import OPENAI_API_KEY, EMBEDDING_MODEL
 
 log = logging.getLogger("cortex.ingest")
@@ -18,15 +23,33 @@ log = logging.getLogger("cortex.ingest")
 async def ingest_meeting_insights(
     project_id: str,
     meeting_id: str,
-    r2_key: str = None
+    insights_data: Optional[Dict[str, Any]] = None,
+    meeting_artifacts: Optional[Dict[str, Any]] = None,
+    meeting_date: Optional[date] = None
 ) -> Optional[Dict[str, Any]]:
     """
-    Step 1: Download insights.yaml from R2, parse, validate, embed, store.
+    Step 1: Parse, validate, embed and store meeting insights.
+    Accepts direct NERVE payloads for insights and artifacts.
     Returns: insight record with id, or None on failure.
     """
     try:
-        r2 = get_r2_client()
         conn = await get_connection()
+
+        # Normalize or create the project for local stub tests
+        normalized_project_id = await normalize_project_id(project_id)
+        if not normalized_project_id:
+            log.warning(f"Project {project_id} not found. Creating local stub project record.")
+            created_project = await create_or_get_project(
+                erp_project_id=project_id,
+                project_name=f"Local stub project {project_id}",
+                project_type="client",
+                client_id=None,
+                pm_employee_id="local-pm",
+                start_date=None,
+                end_date=None,
+            )
+            normalized_project_id = created_project["id"]
+        project_id = normalized_project_id
 
         # 1. Check if already ingested (duplicate prevention)
         existing = await conn.fetchrow(
@@ -37,11 +60,22 @@ async def ingest_meeting_insights(
             log.info(f"Meeting {meeting_id} already ingested. Skipping.")
             return {"id": str(existing["id"]), "action": "skipped"}
 
-        # 2. Download insights.yaml from R2
-        insights_data = await r2.download_yaml(project_id, meeting_id, r2_key)
-        if not insights_data:
-            log.error(f"Failed to download insights.yaml for {meeting_id}")
-            return None
+        # 2. Use direct NERVE insights payload;
+        if insights_data is None:
+            if meeting_artifacts is not None:
+                insights_data = {
+                    "meeting_id": meeting_id,
+                    "project_id": project_id,
+                    "meeting_type": "other",
+                    "meeting_date": meeting_date or date.today(),
+                    "summary": meeting_artifacts.get("summary", "Nerve-provided artifact payload"),
+                    "meeting_artifacts": meeting_artifacts
+                }
+            else:
+                log.error(f"No insights payload or artifacts provided for {meeting_id}")
+                return None
+        elif meeting_artifacts is not None:
+            insights_data["meeting_artifacts"] = meeting_artifacts
 
         # 3. Parse and validate
         try:
@@ -56,21 +90,37 @@ async def ingest_meeting_insights(
             log.warning(f"Failed to generate embedding for {meeting_id}. Continuing without embedding.")
 
         # 5. Upsert meeting_insights row
-        insight_id = await conn.fetchval(
-            """
-            INSERT INTO meeting_insights (
-                project_id, meeting_id, meeting_type, meeting_date, raw_yaml, summary_embedding
+        if embedding is not None and await _table_has_column(conn, "meeting_insights", "summary_embedding"):
+            insight_id = await conn.fetchval(
+                """
+                INSERT INTO meeting_insights (
+                    project_id, meeting_id, meeting_type, meeting_date, raw_yaml, summary_embedding
+                )
+                VALUES ($1, $2, $3, $4, $5, $6)
+                RETURNING id
+                """,
+                project_id,
+                meeting_id,
+                meeting_yaml.meeting_type.value,
+                meeting_yaml.meeting_date,
+                json.dumps(insights_data),
+                embedding
             )
-            VALUES ($1, $2, $3, $4, $5, $6)
-            RETURNING id
-            """,
-            project_id,
-            meeting_id,
-            meeting_yaml.meeting_type.value,
-            meeting_yaml.meeting_date,
-            json.dumps(insights_data),
-            embedding  # Will be NULL if not available
-        )
+        else:
+            insight_id = await conn.fetchval(
+                """
+                INSERT INTO meeting_insights (
+                    project_id, meeting_id, meeting_type, meeting_date, raw_yaml
+                )
+                VALUES ($1, $2, $3, $4, $5)
+                RETURNING id
+                """,
+                project_id,
+                meeting_id,
+                meeting_yaml.meeting_type.value,
+                meeting_yaml.meeting_date,
+                json.dumps(insights_data)
+            )
 
         log.info(f"✓ Ingested meeting {meeting_id} → insight {insight_id}")
 
@@ -119,3 +169,21 @@ async def _embed_text(text: str) -> Optional[list]:
     except Exception as e:
         log.error(f"Embedding generation failed: {e}")
         return None
+
+async def _table_has_column(conn: asyncpg.Connection, table_name: str, column_name: str) -> bool:
+    """Return True if the given table contains the specified column."""
+    try:
+        result = await conn.fetchval(
+            """
+            SELECT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = $1 AND column_name = $2
+            )
+            """,
+            table_name,
+            column_name
+        )
+        return bool(result)
+    except Exception as e:
+        log.warning(f"Could not check table column {table_name}.{column_name}: {e}")
+        return False

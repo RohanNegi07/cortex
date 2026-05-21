@@ -11,7 +11,7 @@ from cortex.config import CORTEX_API_KEY
 
 log = logging.getLogger("cortex.calibrate")
 
-router = APIRouter(prefix="/cortex", tags=["CALIBRATE"])
+router = APIRouter(prefix="/cortex/health", tags=["calibration"])
 
 
 class CalibratePayload(BaseModel):

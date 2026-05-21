@@ -1,7 +1,7 @@
 """
 CORTEX Documents Service
 Generates documents: status reports, KT docs, milestone deliverables
-Uses R2 templates + GROQ for filling
+Uses hardcoded templates + GROQ for filling
 """
 
 import logging
@@ -12,7 +12,6 @@ from typing import Optional, Dict, Any
 from cortex.config import GROQ_API_KEY, GROQ_MODEL
 from cortex.models.schemas import DocumentRequest, DocumentResponse
 from cortex.models.db import get_connection, release_connection, normalize_project_id
-from cortex.integrations.r2 import get_r2_client
 from cortex.services.templates import load_template
 
 log = logging.getLogger("cortex.documents")
@@ -164,42 +163,18 @@ Fill the template now:"""
         log.debug("GROQ not available, using simple template injection")
         content = template.format(**context)
 
-    # Upload to R2
-    r2 = get_r2_client()
     filename = f"{doc_type}_v1.0_{datetime.now().strftime('%Y%m%d')}.md"
-    try:
-        r2_key = await r2.upload_document(
-            project_id=project_id,
-            doc_type=doc_type,
-            filename=filename,
-            content=content.encode("utf-8"),
-            version="v1.0"
-        )
-        log.info(f"Document uploaded to R2: {r2_key}")
-    except Exception as e:
-        log.error(f"Failed to upload document to R2: {e}")
-        r2_key = None
+    document_path = f"generated/{project_id}/{filename}"
+    log.info(f"Document generated at {document_path}")
 
     return DocumentResponse(
         project_id=project_id,
         document_type=doc_type,
         content=content,
-        file_path=r2_key or f"docs/{project_id}_{doc_type}_{datetime.now().strftime('%Y%m%d')}.md",
+        file_path=document_path,
         version=1,
         generated_at=datetime.utcnow()
     )
-
-
-async def _validate_r2_key_prefix(external_project_id: str, internal_project_id: str, r2_key: str) -> None:
-    """Validate that the R2 key is in an expected project prefix."""
-    prefixes = [
-        f"projects/{internal_project_id}/",
-        f"projects/{external_project_id}/"
-    ]
-    if not any(r2_key.startswith(prefix) for prefix in prefixes):
-        raise ValueError(
-            "r2_key must begin with one of: " + ", ".join(prefixes)
-        )
 
 
 async def handle_document_upload(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -223,14 +198,9 @@ async def handle_document_upload(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not internal_project_id:
         raise ValueError(f"Project not found: {project_id}")
 
-    # Validate R2 path prefix to ensure the object belongs to the project
-    await _validate_r2_key_prefix(project_id, internal_project_id, r2_key)
-
-    # Verify R2 object exists before storing the record
-    r2 = get_r2_client()
-    object_data = await r2.get_object(r2_key)
-    if object_data is None:
-        raise ValueError(f"R2 object not found for r2_key: {r2_key}")
+    # Ensure the document path is not empty and belongs to the project prefix
+    if not r2_key.startswith(f"projects/{project_id}/") and not r2_key.startswith(f"projects/{internal_project_id}/"):
+        raise ValueError("document path must begin with the project prefix")
 
     conn = await get_connection()
     try:

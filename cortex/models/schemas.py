@@ -2,6 +2,8 @@
 Pydantic schemas for request/response validation
 """
 
+from __future__ import annotations
+
 from pydantic import BaseModel, Field
 from datetime import datetime, date
 from typing import Optional, List, Dict, Any
@@ -56,9 +58,10 @@ class NERVEEvent(BaseModel):
     event_type: str  # "iris.extraction.complete"
     project_id: str
     meeting_id: str
-    r2_key: str  # path to insights.yaml in R2
     meeting_date: date
     timestamp: datetime
+    insights: Optional[InsightsYAML] = None
+    meeting_artifacts: Optional[Dict[str, Any]] = None  # transcripts, EODs, docs, etc.
 
 class InsightsYAML(BaseModel):
     """IRIS output structure that CORTEX ingests"""
@@ -75,6 +78,9 @@ class InsightsYAML(BaseModel):
 
     previous_meeting_ref: Optional[Dict[str, Any]] = None  # CORTEX fills
     relationship_trajectory: Optional[Dict[str, Any]] = None  # CORTEX fills
+
+    class Config:
+        extra = "allow"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # HEALTH SCORE
@@ -177,6 +183,49 @@ class ChatResponse(BaseModel):
     confidence: float = 0.8
     sources: List[str] = []  # meeting IDs used for context
     generated_at: datetime
+
+class EODStatus(str, Enum):
+    ON_TRACK = "on_track"
+    AT_RISK = "at_risk"
+    BLOCKED = "blocked"
+    LEAVE = "leave"
+
+class EODTask(BaseModel):
+    task: str
+    status: Optional[str] = None
+    assignee: Optional[str] = None
+    due_date: Optional[date] = None
+
+class EODReportRequest(BaseModel):
+    project_id: str
+    reporter_id: str
+    report_date: date
+    status: EODStatus = EODStatus.ON_TRACK
+    summary: str
+    tasks_completed: List[EODTask] = []
+    tasks_blocked: List[EODTask] = []
+    leave_reason: Optional[str] = None
+
+class EODReportResponse(BaseModel):
+    id: str
+    project_id: str
+    reporter_id: str
+    report_date: date
+    status: EODStatus
+    summary: Optional[str] = None
+    tasks_completed: List[EODTask] = []
+    tasks_blocked: List[EODTask] = []
+    leave_reason: Optional[str] = None
+    created_at: datetime
+
+class WeeklyEODHealth(BaseModel):
+    project_id: str
+    week_start: date
+    score: int
+    band: HealthBand
+    components: Dict[str, Any]
+    eod_count: int
+    created_at: datetime
 
 # ─────────────────────────────────────────────────────────────────────────────
 # DOCUMENTS

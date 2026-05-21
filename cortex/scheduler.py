@@ -14,7 +14,7 @@ from typing import Optional
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-from cortex.config import TIMEZONE, WEEKLY_PLAN_TIME, HEALTH_SCAN_TIME
+from cortex.config import TIMEZONE, WEEKLY_PLAN_TIME, HEALTH_SCAN_TIME, WEEKLY_HEALTH_TIME
 
 log = logging.getLogger("cortex.scheduler")
 
@@ -68,6 +68,17 @@ def init_scheduler() -> AsyncIOScheduler:
     )
     log.info("Scheduled: Cadence check on Monday at 09:00")
 
+    # Weekly EOD health computation (Sunday 07:00)
+    health_hour, health_minute = parse_time(WEEKLY_HEALTH_TIME)
+    scheduler.add_job(
+        weekly_eod_health_job,
+        CronTrigger(day_of_week="sun", hour=health_hour, minute=health_minute, timezone=TIMEZONE),
+        id="weekly_eod_health_sunday",
+        name="Compute weekly EOD health",
+        replace_existing=True
+    )
+    log.info(f"Scheduled: Weekly EOD health at Sunday {WEEKLY_HEALTH_TIME}")
+
     # Renewal signal (Sunday 08:00)
     scheduler.add_job(
         renewal_signal_job,
@@ -93,6 +104,24 @@ async def weekly_plan_job():
         )
     except Exception as e:
         log.error(f"Weekly plan job failed: {e}", exc_info=True)
+
+
+async def weekly_eod_health_job():
+    """Compute weekly EOD health for all projects with reports (Sunday 07:00)"""
+    from cortex.services.eod import compute_weekly_health_for_week
+    from datetime import datetime, timedelta
+
+    log.info("=== WEEKLY EOD HEALTH JOB STARTED ===")
+    try:
+        today = datetime.now()
+        week_start = today.date() - timedelta(days=today.weekday())
+
+        result = await compute_weekly_health_for_week(week_start)
+        log.info(
+            f"Weekly EOD health job completed: {result['computed']}/{result['total_projects']} computed"
+        )
+    except Exception as e:
+        log.error(f"Weekly EOD health job failed: {e}", exc_info=True)
 
 
 async def health_scan_job():

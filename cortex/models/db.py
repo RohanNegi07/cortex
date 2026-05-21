@@ -3,6 +3,7 @@ Database initialization, connection management, and async queries using asyncpg
 """
 
 import asyncpg
+import uuid
 from typing import Optional, List, Dict, Any
 from datetime import datetime, date
 import json
@@ -63,9 +64,17 @@ async def normalize_project_id(project_id: str) -> Optional[str]:
     """Normalize an incoming project identifier to the internal project UUID."""
     conn = await get_connection()
     try:
-        row = await conn.fetchrow("SELECT id FROM projects WHERE id = $1", project_id)
+        row = None
+        try:
+            # Only query UUID column when the input is a valid UUID string.
+            uuid.UUID(project_id)
+            row = await conn.fetchrow("SELECT id FROM projects WHERE id = $1", project_id)
+        except ValueError:
+            row = None
+
         if row:
             return str(row["id"])
+
         row = await conn.fetchrow("SELECT id FROM projects WHERE erp_project_id = $1", project_id)
         return str(row["id"]) if row else None
     finally:
@@ -197,7 +206,7 @@ async def insert_health_score(
             VALUES ($1, $2, $3, $4, $5)
             RETURNING id
             """,
-            project_id, score, band, json.dumps(components), computed_after_meeting_id
+            project_id, score, band, components, computed_after_meeting_id
         )
         return str(score_id)
     finally:
@@ -216,7 +225,12 @@ async def get_latest_health_score(project_id: str) -> Optional[Dict[str, Any]]:
             """,
             project_id
         )
-        return dict(row) if row else None
+        if not row:
+            return None
+        result = dict(row)
+        if isinstance(result.get("components"), str):
+            result["components"] = json.loads(result["components"])
+        return result
     finally:
         await _pool.release(conn)
 
@@ -452,6 +466,44 @@ CREATE TABLE IF NOT EXISTS project_documents (
     approved_at TIMESTAMPTZ,
     notes TEXT
 );
+
+-- ─────────────────────────────────────────────────────────────────────────
+-- EOD REPORTS
+-- ─────────────────────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS project_eod_reports (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    project_id UUID NOT NULL REFERENCES projects(id),
+    reporter_id TEXT NOT NULL,
+    report_date DATE NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('on_track','at_risk','blocked','leave')) DEFAULT 'on_track',
+    summary TEXT,
+    tasks_completed JSONB DEFAULT '[]',
+    tasks_blocked JSONB DEFAULT '[]',
+    leave_reason TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_eod_reports_project_reporter_date
+    ON project_eod_reports(project_id, reporter_id, report_date);
+
+-- ─────────────────────────────────────────────────────────────────────────
+-- WEEKLY EOD HEALTH
+-- ─────────────────────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS project_weekly_health (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    project_id UUID NOT NULL REFERENCES projects(id),
+    week_start DATE NOT NULL,
+    score INTEGER NOT NULL CHECK (score BETWEEN 0 AND 100),
+    band TEXT NOT NULL CHECK (band IN ('green','amber','red')),
+    components JSONB NOT NULL,
+    eod_count INTEGER NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_weekly_health_project_week
+    ON project_weekly_health(project_id, week_start);
 
 -- ─────────────────────────────────────────────────────────────────────────
 -- PM TASK PLANS (WEEKLY)

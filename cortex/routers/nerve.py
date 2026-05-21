@@ -8,6 +8,7 @@ from pydantic import BaseModel
 import logging
 from datetime import date, datetime
 from cortex.models.schemas import NERVEEvent
+from cortex.models.db import normalize_project_id, create_or_get_project
 from cortex.services.ingest import ingest_meeting_insights
 from cortex.services.memory import stitch_meeting_memory
 from cortex.services.narrative import update_narrative
@@ -30,7 +31,7 @@ async def ingest_nerve(
     Triggers the full 7-step ingest pipeline.
 
     Pipeline:
-      1. INGEST — download, parse, embed insights.yaml
+      1. INGEST — parse, validate, embed insights
       2. MEMORY STITCH — cross-meeting narrative
       3. NARRATIVE UPDATE — LLM relationship trajectory
       4. HEALTH SCORE — deterministic scoring
@@ -42,12 +43,34 @@ async def ingest_nerve(
         project_id = event.project_id
         meeting_id = event.meeting_id
 
+        # Normalize or create the project so the full pipeline uses internal UUIDs.
+        internal_project_id = await normalize_project_id(project_id)
+        if not internal_project_id:
+            log.warning(f"Project {project_id} not found. Creating local stub project record.")
+            created_project = await create_or_get_project(
+                erp_project_id=project_id,
+                project_name=f"Local stub project {project_id}",
+                project_type="client",
+                client_id=None,
+                pm_employee_id="local-pm",
+                start_date=None,
+                end_date=None,
+            )
+            internal_project_id = created_project["id"]
+        project_id = internal_project_id
+
         log.info(f"NERVE event received: {project_id} / {meeting_id}")
 
         # ─────────────────────────────────────────────────────────────────
         # Step 1: INGEST
         # ─────────────────────────────────────────────────────────────────
-        ingest_result = await ingest_meeting_insights(project_id, meeting_id, event.r2_key)
+        ingest_result = await ingest_meeting_insights(
+            project_id,
+            meeting_id,
+            insights_data=event.insights.dict() if event.insights else None,
+            meeting_artifacts=event.meeting_artifacts,
+            meeting_date=event.meeting_date
+        )
         if not ingest_result:
             log.error(f"Ingest failed for {meeting_id}")
             raise HTTPException(status_code=500, detail="Ingest failed")

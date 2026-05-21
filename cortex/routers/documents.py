@@ -40,7 +40,7 @@ class DocumentUploadPayload(BaseModel):
 
 @router.post("/document-upload")
 async def document_upload(payload: DocumentUploadPayload, x_api_key: Optional[str] = Header(None)):
-    """Register a document that was uploaded to R2 by the intranet.
+    """Register a document that was uploaded by the intranet.
 
     Example payload:
     {

@@ -1,6 +1,6 @@
 """
 CORTEX Enrich YAML Service (Step 6)
-Writes insights_enriched.yaml to R2 with filled previous_meeting_ref
+Persists enriched meeting insights to the database with filled previous_meeting_ref
 and relationship_trajectory.
 """
 
@@ -10,7 +10,6 @@ from typing import Optional, Dict, Any
 from datetime import datetime
 import asyncpg
 from cortex.models.db import get_connection, release_connection
-from cortex.integrations.r2 import get_r2_client
 
 log = logging.getLogger("cortex.enrich")
 
@@ -19,12 +18,11 @@ async def write_enriched_yaml(
     insight_id: str
 ) -> Optional[Dict[str, Any]]:
     """
-    Step 6: Write enriched YAML to R2.
+    Step 6: Persist enriched YAML into the database.
     Adds previous_meeting_ref and relationship_trajectory from project_memory.
     """
     try:
         conn = await get_connection()
-        r2 = get_r2_client()
 
         # 1. Get the meeting insight
         meeting = await conn.fetchrow(
@@ -69,27 +67,14 @@ async def write_enriched_yaml(
                 "band": health["band"]
             }
 
-        # 4. Upload enriched YAML to R2
-        success = await r2.upload_yaml(
-            project_id,
-            meeting["meeting_id"],
-            enriched,
-            enriched=True,
-            date_str=meeting["meeting_date"].isoformat()
+        # 4. Persist enriched YAML into the database
+        await conn.execute(
+            "UPDATE meeting_insights SET enriched_yaml = $1 WHERE id = $2",
+            json.dumps(enriched),
+            insight_id
         )
-
-        if success:
-            # 5. Update meeting_insights with enriched_yaml
-            await conn.execute(
-                "UPDATE meeting_insights SET enriched_yaml = $1 WHERE id = $2",
-                json.dumps(enriched),
-                insight_id
-            )
-            log.info(f"✓ Enriched YAML written to R2 for {meeting['meeting_id']}")
-            return {"r2_key": f"projects/{project_id}/.../{meeting['meeting_id']}/insights_enriched.yaml"}
-        else:
-            log.warning(f"Failed to upload enriched YAML for {meeting['meeting_id']}")
-            return None
+        log.info(f"✓ Enriched YAML persisted for {meeting['meeting_id']}")
+        return {"status": "ok", "insight_id": insight_id}
 
     except Exception as e:
         log.error(f"Enrich failed: {e}", exc_info=True)

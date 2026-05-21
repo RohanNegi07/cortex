@@ -124,7 +124,7 @@ async def generate_weekly_plan(
                     response = claude_client.messages.create(
                         model=ANTHROPIC_MODEL,
                         max_tokens=1500,
-                        system_prompt="You are a senior PM planning execution. Output YAML format without markdown.",
+                        system="You are a senior PM planning execution. Output YAML format without markdown.",
                         messages=[{"role": "user", "content": prompt}]
                     )
                     plan_content = response.content[0].text

@@ -13,39 +13,69 @@ from cortex.config import ANTHROPIC_MODEL, GROQ_MODEL
 log = logging.getLogger("cortex.chat.engine")
 
 
+def _extract_response_text(response: Any) -> str:
+    content = response.get("content", "") if isinstance(response, dict) else getattr(response, "content", "")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        text_parts = []
+        for chunk in content:
+            if isinstance(chunk, str):
+                text_parts.append(chunk)
+            else:
+                value = getattr(chunk, "text", None) or getattr(chunk, "content", None)
+                if value is None:
+                    try:
+                        text_parts.append(str(chunk))
+                    except Exception:
+                        pass
+                else:
+                    text_parts.append(value)
+        return "".join(text_parts)
+    if isinstance(content, dict):
+        return content.get("text", content.get("content", ""))
+    return str(content) if content is not None else ""
+
+
 async def process_chat_query(request: ChatRequest) -> ChatResponse:
     project_context = await get_project_context(request.project_id)
     role_prompt = get_role_prompt(request.user_role)
+    health_score = project_context.get("health_score")
+    health_status = project_context.get("health_band")
 
-    # Build system and user messages consistently
-    system_message = {
-        "role": "system",
-        "content": (
-            f"{role_prompt}\n"
-            f"Project context: {project_context}\n"
-            "Answer clearly and keep responses actionable."
-        )
-    }
+    # Build system prompt + user message for Anthropic
+    system_prompt = (
+        f"{role_prompt}\n"
+        f"Project context: {project_context}\n"
+        "Answer clearly and keep responses actionable."
+    )
     user_message = {
         "role": "user",
         "content": request.question
     }
-    messages = [system_message, user_message]
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        user_message
+    ]
 
     anthropic_client = get_anthropic_client()
     if anthropic_client:
         try:
             response = anthropic_client.messages.create(
                 model=ANTHROPIC_MODEL,
-                messages=messages,
+                system=system_prompt,
+                messages=[user_message],
                 max_tokens=600,
                 temperature=0.7
             )
-            response_text = response.get("content", "") if isinstance(response, dict) else getattr(response, "content", "")
+            response_text = _extract_response_text(response)
             return ChatResponse(
                 answer=response_text,
                 project_id=request.project_id,
                 user_role=request.user_role,
+                health_score=health_score,
+                status=health_status,
                 confidence=0.9,
                 generated_at=datetime.utcnow()
             )
@@ -61,11 +91,13 @@ async def process_chat_query(request: ChatRequest) -> ChatResponse:
                 temperature=0.7,
                 max_tokens=600
             )
-            response_text = response.get("content", "") if isinstance(response, dict) else getattr(response, "content", "")
+            response_text = _extract_response_text(response)
             return ChatResponse(
                 answer=response_text,
                 project_id=request.project_id,
                 user_role=request.user_role,
+                health_score=health_score,
+                status=health_status,
                 confidence=0.9,
                 generated_at=datetime.utcnow()
             )
@@ -76,6 +108,8 @@ async def process_chat_query(request: ChatRequest) -> ChatResponse:
         answer="I am unable to generate a response at this time. Please try again later.",
         project_id=request.project_id,
         user_role=request.user_role,
+        health_score=health_score,
+        status=health_status,
         confidence=0.5,
         generated_at=datetime.utcnow(),
         sources=[]

@@ -28,26 +28,16 @@ DATABASE_URL = (_db_url
 DATABASE_POOL_SIZE = int(os.environ.get("DATABASE_POOL_SIZE", 10))
 DATABASE_MAX_OVERFLOW = int(os.environ.get("DATABASE_MAX_OVERFLOW", 20))
 
-# ─────────────────────────────────────────────────────────────────────────────
-# R2 (Cloudflare)
-# ─────────────────────────────────────────────────────────────────────────────
-
-R2_ENDPOINT_URL = os.environ.get("R2_ENDPOINT_URL", "")
-R2_ACCESS_KEY_ID = os.environ.get("R2_ACCESS_KEY_ID", "")
-R2_SECRET_ACCESS_KEY = os.environ.get("R2_SECRET_ACCESS_KEY", "")
-R2_BUCKET_NAME = os.environ.get("R2_BUCKET_NAME", "erp-agents")
-
-# ─────────────────────────────────────────────────────────────────────────────
 # LLM
 # ─────────────────────────────────────────────────────────────────────────────
 
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
-ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-20250514")
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-20250514").strip()
 
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
-GROQ_MODEL = os.environ.get("GROQ_MODEL", "llama-3.1-8b-instant")
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "").strip()
+GROQ_MODEL = os.environ.get("GROQ_MODEL", "llama-3.1-8b-instant").strip()
 
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
 EMBEDDING_MODEL = "text-embedding-3-small"  # for pgvector
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -88,6 +78,7 @@ TIMEZONE = os.environ.get("TZ", "Asia/Kolkata")
 HEALTH_SCAN_TIME = os.environ.get("HEALTH_SCAN_TIME", "08:00")
 HEALTH_SCAN_DAY = os.environ.get("HEALTH_SCAN_DAY", "monday")
 WEEKLY_PLAN_TIME = os.environ.get("WEEKLY_PLAN_TIME", "07:30")
+WEEKLY_HEALTH_TIME = os.environ.get("WEEKLY_HEALTH_TIME", "07:00")
 CADENCE_CHECK_TIME = os.environ.get("CADENCE_CHECK_TIME", "08:00")
 RENEWAL_CHECK_TIME = os.environ.get("RENEWAL_CHECK_TIME", "08:00")
 

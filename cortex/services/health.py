@@ -24,11 +24,59 @@ SCORE_RULES = {
         "milestones": 0.20,
         "trajectory": 0.10,
         "velocity": 0.10,
+        "artifacts": 0.10,
     },
     "sentiment_threshold": 0.3,  # below this = penalty
     "red_threshold": 60,
     "amber_threshold": 80,
 }
+
+
+def _artifact_penalty_from_artifacts(artifacts: Dict[str, Any]) -> int:
+    """Compute an additional penalty based on NERVE-provided EOD/SOW/doc artifacts."""
+    if not artifacts or not isinstance(artifacts, dict):
+        return 0
+
+    penalty = 0
+    eod_entries = artifacts.get("eod_reports") or artifacts.get("eods") or artifacts.get("eod") or []
+    if isinstance(eod_entries, dict):
+        eod_entries = [eod_entries]
+
+    for entry in eod_entries:
+        status = str(entry.get("status", "")).lower()
+        if status in ("blocked", "at_risk", "at risk", "off_track", "off track"):
+            penalty += 8
+        elif status == "leave":
+            penalty += 3
+
+    if isinstance(eod_entries, list) and len(eod_entries) == 0 and artifacts.get("expects_eod"):
+        penalty += 5
+
+    doc_entries = artifacts.get("documents") or artifacts.get("source_docs") or artifacts.get("docs") or []
+    if isinstance(doc_entries, dict):
+        doc_entries = [doc_entries]
+
+    sow_docs = [d for d in doc_entries if str(d.get("doc_type", "")).lower() == "sow" or str(d.get("type", "")).lower() == "sow"]
+    if sow_docs:
+        for doc in sow_docs:
+            status = str(doc.get("status", "")).lower()
+            if status in ("draft", "pending", "missing", "not_uploaded", "not uploaded", "waiting"):
+                penalty += 10
+    elif artifacts.get("requires_sow"):
+        penalty += 8
+
+    return min(penalty, 50)
+
+
+def _artifact_health_signal(artifacts: Dict[str, Any]) -> Optional[int]:
+    if not artifacts or not isinstance(artifacts, dict):
+        return None
+
+    raw_score = artifacts.get("health_score")
+    if isinstance(raw_score, (int, float)):
+        return max(0, min(100, int(raw_score)))
+    return None
+
 
 async def compute_health_score(
     project_id: str,
@@ -57,7 +105,7 @@ async def compute_health_score(
         milestone_status = json.loads(memory_row["milestone_status"] or "[]")
         relationship_trajectory = json.loads(memory_row["relationship_trajectory"] or "{}")
 
-        # 2. Get recent meetings
+        # 2. Get recent meetings and current meeting artifacts
         recent_meetings = await conn.fetch(
             """
             SELECT * FROM meeting_insights
@@ -67,6 +115,12 @@ async def compute_health_score(
             """,
             project_id
         )
+
+        current_meeting = await conn.fetchrow(
+            "SELECT raw_yaml FROM meeting_insights WHERE id = $1",
+            insight_id
+        )
+        current_yaml = json.loads(current_meeting["raw_yaml"]) if current_meeting else {}
 
         # 3. Compute components
         components = {}
@@ -118,10 +172,19 @@ async def compute_health_score(
         velocity_penalty = 0
         components["velocity_penalty"] = velocity_penalty
 
+        # ── ARTIFACT SIGNALS FROM NERVE
+        artifact_penalty = _artifact_penalty_from_artifacts(current_yaml.get("meeting_artifacts", {}))
+        components["artifact_penalty"] = artifact_penalty
+
         # 4. Compute final score
         score = 100
-        for penalty_key in ["sentiment_penalty", "open_risks_penalty", "blocker_penalty", "milestone_penalty", "trajectory_penalty", "velocity_penalty"]:
+        for penalty_key in ["sentiment_penalty", "open_risks_penalty", "blocker_penalty", "milestone_penalty", "trajectory_penalty", "velocity_penalty", "artifact_penalty"]:
             score -= components[penalty_key]
+
+        artifact_health_signal = _artifact_health_signal(current_yaml.get("meeting_artifacts", {}))
+        score = max(0, min(100, score))
+        if artifact_health_signal is not None:
+            score = int(round((score * 0.7) + (artifact_health_signal * 0.3)))
 
         score = max(0, min(100, score))
 

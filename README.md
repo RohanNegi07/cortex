@@ -1,438 +1,711 @@
-# CORTEX
+# CORTEX — Project Health Intelligence Service
 
-**Client Oversight & Relationship Trajectory Executive**
+**CORTEX** (Client Oversight & Relationship Trajectory Executive) is the project intelligence and PM command layer of a consultancy's internal toolchain. It sits at the end of a three-service pipeline:
 
-Agent 3 in the `IRIS → CELL → CORTEX` pipeline. CORTEX is the project intelligence and PM command layer for the consultancy. It receives every meeting extraction that IRIS produces, stitches them into a living memory of each client engagement, tracks health and sentiment over time, manages the document lifecycle, and answers any stakeholder question about any project — shaped for their role.
+```
+IRIS  →  CELL  →  CORTEX
+(transcription & extraction)  (task tracking)  (project health, memory, documents, chat)
+```
 
-> *IRIS perceives. CELL executes. CORTEX thinks.*
+CORTEX receives structured meeting extraction events from IRIS, builds living project memory, computes deterministic health scores, generates documents, posts Slack alerts, and answers role-aware questions about any project.
 
 ---
 
-## What CORTEX Does
+## Table of Contents
 
-When IRIS finishes processing a meeting transcript, it fires a NERVE event to CORTEX. CORTEX then runs a deterministic 7-step pipeline automatically:
-
-1. **Ingest** — downloads `insights.yaml` from R2, validates schema, embeds summary via OpenAI `text-embedding-3-small` into pgvector
-2. **Memory Stitch** — fills `previous_meeting_ref`, updates sentiment history, merges risks, ages blockers, tracks milestone status
-3. **Narrative Update** — LLM call (Claude) to update `relationship_trajectory` (trend + narrative prose)
-4. **Health Score** — deterministic 0–100 score across 6 dimensions: sentiment, open risks, blockers, milestones, trajectory, velocity
-5. **Milestone Drift** — compares current velocity against original SOW dates, flags at-risk milestones
-6. **Enrich YAML** — writes `insights_enriched.yaml` back to R2 with the two fields IRIS leaves null filled in
-7. **Conditional Triggers** — fires action briefs, Slack alerts, and document drafts based on meeting type and health signals
-
-Beyond ingestion, CORTEX also handles:
-
-- **Document generation** — status reports, KT documents, milestone deliverables (LLM-generated, versioned, stored in R2)
-- **Document upload registration** — PM uploads SOW/architecture docs via intranet, CORTEX registers and extracts structure
-- **Role-aware chat** — intranet project page chatbot where the same underlying data is shaped differently for PM, BA/Sales, Director, or APM
-- **Team change handling** — on PM reassignment, auto-generates an onboarding brief and KT document
-- **Scheduled jobs** — weekly plans every Monday 07:30 IST, daily health scans at 08:00, cadence gap monitoring, Sunday renewal signals
-- **Slack notifications** — health alerts, action briefs, weekly summaries (capability built; delivery activation deferred)
-- **Calibration events** — immutable overlays when project context shifts (POC → Milestone 1, scope change, timeline rebase). Raw history is never mutated.
+1. [What this service does](#what-this-service-does)
+2. [Architecture at a glance](#architecture-at-a-glance)
+3. [The 7-step ingest pipeline](#the-7-step-ingest-pipeline)
+4. [Health score logic](#health-score-logic)
+5. [Project structure](#project-structure)
+6. [All API endpoints](#all-api-endpoints)
+7. [Key data models](#key-data-models)
+8. [Scheduled jobs](#scheduled-jobs)
+9. [Configuration & environment variables](#configuration--environment-variables)
+10. [Running locally](#running-locally)
+11. [External dependencies](#external-dependencies)
+12. [Concepts for new readers](#concepts-for-new-readers)
 
 ---
 
-## Pipeline Position
+## What this service does
 
-```
-Meeting artifacts (R2)
-        │
-        ▼
-    IRIS (8000)       — Agent 1: extracts structured insights.yaml per meeting
-        │  NERVE event
-        ▼
-    CELL (8002)       — Agent 2: intern tasks, EOD, bounties, ERP writes
-        │  weekly summary API
-        ▼
-    CORTEX (8004)     — Agent 3: project memory, health, documents, PM intelligence
-        │
-        ▼
-    Intranet chatbot  — embedded on project page, role-aware, conversational
-```
+| Capability | How it works |
+|---|---|
+| **Meeting ingest** | Receives `NERVEEvent` payloads from IRIS and runs a 7-step pipeline to process each meeting |
+| **Project memory** | Stitches sentiment history, risk register, blocker log, and milestone state across meetings |
+| **Health scoring** | Deterministic (no LLM) score from 0–100, banded as green/amber/red |
+| **Narrative update** | LLM-generated relationship trajectory text, updated per meeting |
+| **Document generation** | Status reports, KT (knowledge transfer) docs, milestone deliverables |
+| **EOD reports** | Daily end-of-day submissions that roll up into weekly health summaries |
+| **Team change handling** | PM reassignment webhooks that auto-trigger KT document generation |
+| **Calibration events** | Manual re-baselining of project health, recorded for audit |
+| **Slack notifications** | Health alerts, action briefs, and weekly summaries posted to Slack |
+| **Project chat** | Role-aware (PM / BA / Director / APM) Q&A interface backed by Claude |
 
 ---
 
-## Full Request Flow
-
-### 1. Meeting Ingestion (NERVE event)
+## Architecture at a glance
 
 ```
-IRIS fires → POST /cortex/ingest-nerve
-                │
-                ├─ Step 1: Download insights.yaml from R2
-                │          Parse + validate (InsightsYAML schema)
-                │          Embed summary → pgvector
-                │          Insert into meeting_insights
-                │
-                ├─ Step 2: Load project_memory
-                │          Fill previous_meeting_ref (last meeting ref)
-                │          Append to sentiment_history
-                │          Merge new risks into risk_register
-                │          Age unresolved blockers in blocker_log
-                │          Update milestone_status
-                │
-                ├─ Step 3: LLM call → update relationship_trajectory
-                │          { trend: improving|stable|declining, narrative: "..." }
-                │
-                ├─ Step 4: Deterministic health score (0–100)
-                │          sentiment_penalty + open_risks_penalty
-                │          + blocker_penalty + milestone_penalty
-                │          + trajectory_penalty + velocity_penalty
-                │          Band: green (≥80) / amber (≥60) / red (<60)
-                │          Insert into project_health_scores
-                │
-                ├─ Step 5: Milestone drift detection
-                │          current_due_date vs original_due_date
-                │          Flag at_risk milestones
-                │
-                ├─ Step 6: Write insights_enriched.yaml → R2
-                │          Adds previous_meeting_ref + relationship_trajectory
-                │          that IRIS left null
-                │
-                └─ Step 7: Conditional triggers
-                           client-call     → action brief via Slack
-                           milestone-review → draft milestone deliverable
-                           health score red → health alert via Slack
-                           3× sentiment decline → alert
-                           POC todo items → POST /cell/ingest-tasks
+┌──────────────────────────────────────────────────────────────┐
+│                        CORTEX (port 8004)                    │
+│                                                              │
+│  FastAPI app  ──  routers/  ──  services/  ──  models/db.py  │
+│       │                │                                     │
+│   scheduler       integrations/          pgvector (memory)   │
+│  (APScheduler)    cell_api / erp                             │
+│                   intranet / slack                            │
+└──────────────────────────────────────────────────────────────┘
+          ▲                    ▲
+       IRIS sends          ERP / Intranet
+     NERVEEvent            webhooks
 ```
 
-### 2. Chat (Intranet project page)
+- **FastAPI** runs on port `8004` (configurable).
+- **asyncpg** manages a connection pool to PostgreSQL (with pgvector for semantic search).
+- **APScheduler** runs recurring background jobs (health scans, weekly plans, cadence checks).
+- **Anthropic Claude** is used for narrative updates, document generation, and chat.
+- **Cloudflare R2** (via boto3) is referenced for document storage.
+- **Slack SDK** posts notifications via a bot token.
+
+---
+
+## The 7-step ingest pipeline
+
+When IRIS sends a `POST /cortex/ingest-nerve` event, the `nerve` router runs these steps in order:
 
 ```
-Intranet sends X-Employee-ID header
-→ POST /cortex/chat
-    │
-    ├─ Resolve role from employee profile (PM/RM | BA/Sales | Director | APM)
-    ├─ Semantic retrieval from pgvector for relevant past context
-    ├─ Role-aware system prompt selected
-    ├─ LLM call (Claude primary, Groq fallback)
-    └─ Response shaped for role
-       PM:       operational detail, risks, blockers, sentiment
-       BA/Sales: champion identification, expansion signals
-       Director: portfolio health, cost, timeline, renewal
-       APM:      tasks, velocity, intern performance
+Step 1 → INGEST           parse, validate, embed, and store insights in DB
+Step 2 → MEMORY STITCH    build cross-meeting memory: sentiment, risks, blockers, milestones
+Step 3 → NARRATIVE UPDATE LLM-generated relationship trajectory text
+Step 4 → HEALTH SCORE     deterministic scoring (starts at 100, subtracts penalties)
+Step 5 → MILESTONE DRIFT  detect delayed milestones
+Step 6 → ENRICH YAML      write insights_enriched.yaml back to storage
+Step 7 → TRIGGERS         fire conditional actions (Slack alerts, action briefs, docs)
 ```
 
-### 3. Document Generation
+Each step is a separate service function. If a step fails, the pipeline logs the error but continues (it is non-fatal after Step 1). The endpoint returns:
 
-```
-POST /cortex/documents/status-report
-POST /cortex/documents/kt-document
-POST /cortex/documents/milestone-deliverable
-    │
-    ├─ Pull project memory + health scores + milestones from DB
-    ├─ LLM generates document from template
-    ├─ Version assigned (v1.0, v1.1, ...)
-    ├─ Saved to R2: projects/<id>/generated-docs/<name>_<version>.md
-    ├─ Registered in project_documents table (status: draft)
-    └─ PM approval loop via Slack before finalising
+```json
+{
+  "status": "success",
+  "project_id": "...",
+  "meeting_id": "...",
+  "health_score": 74,
+  "steps_completed": 7
+}
 ```
 
-### 4. Document Upload (Manual — PM uploads SOW etc.)
+If the meeting was already ingested, it returns `{"status": "skipped", "meeting_id": "..."}`.
 
-```
-POST /cortex/document-upload
-    │
-    ├─ Register in project_documents (source: manual_upload)
-    ├─ Extract structured data from PDF/MD (LLM call)
-    └─ Milestones, timeline, scope extracted → stored in extracted_data JSONB
-```
+---
 
-### 5. Team Change (PM Reassignment)
+## Health score logic
 
-```
-ERP webhook → POST /cortex/team-change
-    │
-    ├─ Receive: project_id, old_pm, new_pm, reason
-    ├─ Generate onboarding brief for new PM (full story so far)
-    └─ Generate KT document (decisions, risks, relationship history, open items)
-```
+The health score is **fully deterministic** — no LLM is involved. It starts at 100 and subtracts penalties across 6 dimensions:
 
-### 6. Calibration Events
-
-```
-POST /cortex/calibrate
-    │
-    ├─ Receive: project_id, event_type, description, before_state, after_state
-    ├─ Insert into calibration_events (immutable — never delete)
-    └─ All downstream reporting reads through the calibration lens
-       Raw history always preserved
-       Multiple calibration events allowed (full audit trail)
-```
-
-### 7. Scheduled Jobs (APScheduler, IST-anchored)
-
-| Time | Job | What it does |
+| Dimension | Weight | What causes a penalty |
 |---|---|---|
-| Monday 07:30 | `weekly_plan_job` | Pull CELL velocity summary, generate PM plan per active project, push POC todos to CELL |
-| Daily 08:00 | `health_scan_job` | Re-scan all active projects, post Slack health alerts if thresholds breached |
-| Monday 09:00 | `cadence_check_job` | Flag projects with no client call in the last 14 days |
-| Sunday 08:00 | `renewal_signal_job` | Flag projects where end_date < 6 weeks away |
+| `sentiment_penalty` | 20% | Sentiment score below 0.3 threshold |
+| `open_risks_penalty` | 20% | High-severity open risks |
+| `blocker_penalty` | 20% | Blockers unresolved for more than `BLOCKER_ALERT_DAYS` |
+| `milestone_penalty` | 20% | At-risk or drifted milestones |
+| `trajectory_penalty` | 10% | Declining relationship trajectory |
+| `velocity_penalty` | 10% | Velocity gap from CELL |
+| `artifact_penalty` | 10% | EOD reports with blocked/at-risk status |
+
+**Bands:**
+
+| Band | Score range |
+|---|---|
+| `green` | ≥ 80 |
+| `amber` | ≥ 60 and < 80 |
+| `red` | < 60 |
+
+Thresholds are configurable via `HEALTH_SCORE_RED_THRESHOLD` and `HEALTH_SCORE_AMBER_THRESHOLD`.
 
 ---
 
-## Project Structure
+## Project structure
 
 ```
 project_health_agent_new/
-│
 ├── cortex/
-│   ├── main.py                    # FastAPI app, lifespan, router registration
-│   ├── config.py                  # All env vars + constants
-│   ├── scheduler.py               # APScheduler setup (4 jobs, Asia/Kolkata)
+│   ├── main.py                  # FastAPI app, lifespan, routers, root endpoint
+│   ├── config.py                # All env vars loaded from .env
+│   ├── scheduler.py             # APScheduler recurring jobs
 │   │
-│   ├── routers/
-│   │   ├── nerve.py               # POST /cortex/ingest-nerve (7-step pipeline)
-│   │   ├── chat.py                # POST /cortex/chat
-│   │   ├── documents.py           # POST /cortex/document-upload + /documents/*
-│   │   ├── slack.py               # POST /cortex/slack/* (health-alert, action-brief, weekly-summary)
-│   │   ├── team.py                # POST /cortex/team-change (router stub)
-│   │   ├── team_change.py         # POST /cortex/team-change (implementation)
-│   │   └── calibrate.py           # POST /cortex/calibrate
+│   ├── routers/                 # HTTP layer — thin, validate + delegate to services
+│   │   ├── nerve.py             # POST /cortex/ingest-nerve  (7-step pipeline)
+│   │   ├── chat.py              # POST /cortex/chat
+│   │   ├── documents.py         # Document upload, approval, generation
+│   │   ├── slack.py             # Slack webhook receivers
+│   │   ├── team_change.py       # Team/PM reassignment webhook
+│   │   ├── calibrate.py         # POST /cortex/health/calibrate
+│   │   └── eod.py               # EOD report ingest + weekly health compute
 │   │
-│   ├── services/
-│   │   ├── ingest.py              # Step 1: yaml download, parse, embed, store
-│   │   ├── memory.py              # Step 2: cross-meeting memory stitch
-│   │   ├── narrative.py           # Step 3: LLM relationship_trajectory update
-│   │   ├── health.py              # Step 4: deterministic health score (6 dimensions)
-│   │   ├── drift.py               # Step 5: milestone drift detection
-│   │   ├── enrich.py              # Step 6: write insights_enriched.yaml to R2
-│   │   ├── triggers.py            # Step 7: conditional post-ingest triggers
-│   │   ├── documents.py           # Document lifecycle: generate, version, approve
-│   │   ├── weekly_plan.py         # Monday plan generation + CELL handoff
-│   │   ├── kt.py                  # KT + onboarding brief generation
-│   │   ├── alerts.py              # Health/blocker/sentiment threshold alerts
-│   │   ├── slack_notifier.py      # Slack SDK wrapper (deferred delivery)
-│   │   ├── cell_client.py         # GET /cell/summary stub
-│   │   ├── templates.py           # Document template loader
-│   │   └── chat.py                # Chat service entry point
+│   ├── services/                # Business logic layer
+│   │   ├── ingest.py            # Step 1: Parse, embed, store meeting insights
+│   │   ├── memory.py            # Step 2: Stitch project memory across meetings
+│   │   ├── narrative.py         # Step 3: LLM relationship trajectory
+│   │   ├── health.py            # Step 4: Deterministic health score
+│   │   ├── drift.py             # Step 5: Milestone drift detection
+│   │   ├── enrich.py            # Step 6: Write enriched YAML
+│   │   ├── triggers.py          # Step 7: Conditional alerts / docs / tasks
+│   │   ├── eod.py               # EOD ingestion and weekly health aggregation
+│   │   ├── documents.py         # Document generation and upload handling
+│   │   ├── kt.py                # KT document generation for team handovers
+│   │   ├── slack_notifier.py    # Slack message posting (alerts, briefs, summaries)
+│   │   ├── chat.py              # Chat request processing
+│   │   ├── templates.py         # Document template loading
+│   │   ├── alerts.py            # Alert dispatch helpers
+│   │   ├── cell_client.py       # CELL API stub client
+│   │   └── weekly_plan.py       # Weekly plan generation
 │   │
-│   ├── chat/
-│   │   ├── engine.py              # Chat orchestration: role resolution, context, LLM call
-│   │   ├── role_prompts.py        # Role-aware system prompts (PM/BA/Director/APM)
-│   │   └── retrieval.py           # pgvector semantic retrieval for chat context
+│   ├── chat/                    # Chat subsystem
+│   │   ├── engine.py            # Orchestration, role selection, LLM invocation
+│   │   ├── role_prompts.py      # System prompts per role (PM / BA / Director / APM)
+│   │   └── retrieval.py         # pgvector semantic retrieval of meeting context
 │   │
-│   ├── llm/
-│   │   ├── client.py              # Anthropic + Groq client wrappers
+│   ├── llm/                     # LLM wrapper
+│   │   ├── client.py            # Anthropic + Groq API clients
 │   │   └── prompts/
-│   │       ├── narrative.py       # relationship_trajectory prompt
-│   │       ├── action_brief.py    # Post-meeting action brief prompt
-│   │       ├── doc_extract.py     # Structured extraction from uploaded docs
-│   │       ├── doc_generate.py    # Document generation prompt
-│   │       ├── weekly_plan.py     # Weekly plan generation prompt
-│   │       └── kt.py              # KT document generation prompt
+│   │       ├── narrative.py     # Relationship trajectory prompt
+│   │       ├── action_brief.py  # Post-meeting action brief prompt
+│   │       ├── doc_generate.py  # Document generation prompt
+│   │       ├── doc_extract.py   # Document extraction prompt
+│   │       ├── kt.py            # KT document prompt
+│   │       └── weekly_plan.py   # Weekly plan prompt
 │   │
-│   ├── integrations/
-│   │   ├── r2.py                  # R2 download/upload (boto3)
-│   │   ├── cell_api.py            # CELL summary + ingest-tasks
-│   │   ├── erp.py                 # ERP milestone webhook
-│   │   ├── intranet.py            # Employee/role lookup
-│   │   └── slack.py               # Slack messaging
+│   ├── integrations/            # External system clients
+│   │   ├── cell_api.py          # CELL summary and task ingest stubs
+│   │   ├── erp.py               # ERP project/team webhook integration
+│   │   └── intranet.py          # Employee/role lookup stub
 │   │
 │   └── models/
-│       ├── db.py                  # asyncpg connection pool + schema init
-│       └── schemas.py             # Pydantic models (NERVEEvent, InsightsYAML, etc.)
+│       ├── db.py                # asyncpg pool, schema init, all DB queries
+│       └── schemas.py           # All Pydantic request/response models
 │
-├── seed_and_test.py               # End-to-end test + seed data runner
-├── inspect_meeting.py             # CLI tool to inspect ingested meeting data
-├── requirements-cortex.txt        # All Python dependencies
-├── CORTEX_ARCHITECTURE.md         # Full architecture + data models + design decisions
-├── TESTING_GUIDE.md               # How to run tests and seed data
-└── .env                           # Environment variables (not committed)
+├── .env.example                 # Copy to .env and fill in values
+└── requirements-cortex.txt      # Python dependencies
 ```
 
 ---
 
-## Data Models (Key Tables)
+## All API endpoints
 
-| Table | Purpose |
-|---|---|
-| `clients` | Client organisations, relationship status |
-| `projects` | Projects (client or internal), linked to ERP |
-| `project_milestones` | SOW milestones with original + current due dates |
-| `calibration_events` | Immutable overlays for context shifts |
-| `meeting_insights` | Every ingested meeting — raw YAML + embedding |
-| `project_memory` | One row per project — living memory (sentiment history, risk register, blocker log, trajectory) |
-| `project_health_scores` | Health score history per project per meeting |
-| `client_stakeholders` | External attendees, champion tracking |
-| `stakeholder_sentiment_log` | Per-stakeholder sentiment per meeting |
-| `project_documents` | All documents (manual + generated), versioned |
-| `pm_task_plans` | Weekly PM plans, linked to CELL velocity data |
-| `agent_actions` | Full audit log of every action CORTEX takes |
+All endpoints are served from `http://localhost:8004` (or wherever `CORTEX_HOST:CORTEX_PORT` is configured).
 
----
+Protected endpoints require an `x-api-key` header matching `CORTEX_API_KEY`. In `development` mode with no key configured, auth is skipped.
 
-## Health Score Calculation
+### Root & health check
 
-The health score is **deterministic — no LLM involved**. It starts at 100 and subtracts penalties:
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `GET` | `/` | No | Returns service name, version, and status |
+| `GET` | `/healthz` | No | Liveness check; returns `HealthCheckResponse` |
 
-| Dimension | Penalty condition |
-|---|---|
-| Sentiment | avg < 0.3 over last 3 meetings → –10 to –20 |
-| Open risks | Each high-severity open risk → –10 |
-| Blockers | Blocker age 3–7 days → –7; age >7 days → –15 |
-| Milestones | Each at-risk milestone → –8 |
-| Trajectory | Declining trend → –10 |
-| Velocity | CELL data stub (to be wired) |
-
-**Bands:** Green ≥ 80 · Amber ≥ 60 · Red < 60
+**`GET /healthz` response:**
+```json
+{
+  "status": "ok",
+  "message": "CORTEX is running",
+  "database_connected": true,
+  "version": "0.1.0"
+}
+```
 
 ---
 
-## API Endpoints
+### Project health
 
-| Method | Path | Description |
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `GET` | `/cortex/health/{project_id}` | No | Latest health score for a project |
+| `GET` | `/cortex/health/{project_id}/weekly/{week_start}` | No | Read stored weekly EOD health |
+| `POST` | `/cortex/health/{project_id}/weekly/{week_start}/compute` | No | Compute weekly EOD health from stored reports |
+
+`{project_id}` can be the internal UUID or an external ERP project ID — CORTEX normalizes it.
+`{week_start}` is a date in `YYYY-MM-DD` format.
+
+**`GET /cortex/health/{project_id}` response:**
+```json
+{
+  "project_id": "uuid-...",
+  "score": 74,
+  "band": "amber",
+  "components": {
+    "sentiment_penalty": 10,
+    "open_risks_penalty": 5,
+    "blocker_penalty": 8,
+    "milestone_penalty": 0,
+    "trajectory_penalty": 0,
+    "velocity_penalty": 3
+  },
+  "computed_after_meeting_id": "mtg-abc-123",
+  "computed_at": "2026-05-21T08:00:00"
+}
+```
+
+---
+
+### NERVE ingest (main pipeline entry point)
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `POST` | `/cortex/ingest-nerve` | `x-api-key` | Receive IRIS extraction event; run 7-step pipeline |
+
+**Request body (`NERVEEvent`):**
+```json
+{
+  "event_type": "iris.extraction.complete",
+  "project_id": "erp-proj-001",
+  "meeting_id": "mtg-2026-05-21-standup",
+  "meeting_date": "2026-05-21",
+  "timestamp": "2026-05-21T10:30:00",
+  "insights": {
+    "meeting_id": "mtg-2026-05-21-standup",
+    "project_id": "erp-proj-001",
+    "meeting_type": "standup",
+    "meeting_date": "2026-05-21",
+    "summary": "Team discussed blocker on integration module.",
+    "risks": [{"id": "r-001", "description": "API latency risk", "severity": "high"}],
+    "blockers": [{"id": "b-001", "description": "Auth service down", "raised_date": "2026-05-20"}],
+    "sentiment": {"score": 0.4, "label": "neutral"},
+    "milestones": []
+  },
+  "meeting_artifacts": {
+    "eod_reports": [],
+    "documents": []
+  }
+}
+```
+
+**Response:**
+```json
+{
+  "status": "success",
+  "project_id": "uuid-...",
+  "meeting_id": "mtg-2026-05-21-standup",
+  "health_score": 74,
+  "steps_completed": 7
+}
+```
+
+---
+
+### Chat (role-aware project Q&A)
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `POST` | `/cortex/chat` | No | Ask a question about a project in natural language |
+
+Roles available: `pm`, `director`, `ba`, `apm`. Each role gets a different system prompt and response style.
+
+**Request (`ChatRequest`):**
+```json
+{
+  "project_id": "erp-proj-001",
+  "question": "What are the top risks right now?",
+  "user_role": "pm",
+  "conversation_history": []
+}
+```
+
+**Response (`ChatResponse`):**
+```json
+{
+  "answer": "The project has two open high-severity risks...",
+  "project_id": "erp-proj-001",
+  "user_role": "pm",
+  "health_score": 74,
+  "status": "amber",
+  "confidence": 0.85,
+  "sources": ["mtg-abc-001", "mtg-abc-002"],
+  "generated_at": "2026-05-21T11:00:00"
+}
+```
+
+---
+
+### Documents
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `POST` | `/cortex/document-upload` | `x-api-key` | Register a document uploaded to R2 |
+| `POST` | `/cortex/documents/approve` | `x-api-key` | Mark a document as approved |
+| `POST` | `/cortex/documents/status-report` | No | Generate a weekly status report |
+| `POST` | `/cortex/documents/kt-document` | No | Generate a knowledge transfer document |
+| `POST` | `/cortex/documents/milestone-deliverable` | No | Generate a milestone deliverable |
+
+**`POST /cortex/document-upload` request:**
+```json
+{
+  "project_id": "erp-proj-001",
+  "document_type": "sow",
+  "r2_key": "projects/erp-proj-001/source-docs/sow.pdf",
+  "source": "manual_upload",
+  "uploader": "pm@company.com"
+}
+```
+
+**`POST /cortex/documents/status-report` request (`DocumentRequest`):**
+```json
+{
+  "project_id": "erp-proj-001",
+  "document_type": "status_report",
+  "meeting_id": "mtg-abc-001"
+}
+```
+
+**Document generation response (`DocumentResponse`):**
+```json
+{
+  "project_id": "erp-proj-001",
+  "document_type": "status_report",
+  "content": "## Weekly Status Report\n...",
+  "file_path": "/path/to/generated/file",
+  "version": 1,
+  "generated_at": "2026-05-21T12:00:00"
+}
+```
+
+**Valid `document_type` values:** `sow`, `solution_architecture`, `timeline`, `proposal`, `milestone_deliverable`, `status_report`, `kt_document`, `onboarding_brief`, `renewal_proposal`, `other`
+
+---
+
+### Slack webhook receivers
+
+These endpoints receive calls from CORTEX's own scheduler/trigger system and forward messages to Slack.
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `POST` | `/cortex/slack/health-alert` | `x-api-key` | Post a health alert to Slack |
+| `POST` | `/cortex/slack/action-brief` | `x-api-key` | Post an action brief to Slack |
+| `POST` | `/cortex/slack/weekly-summary` | `x-api-key` | Post a weekly summary to Slack |
+
+**`POST /cortex/slack/health-alert` request:**
+```json
+{
+  "project_id": "erp-proj-001",
+  "score": 55,
+  "band": "red",
+  "old_score": 72,
+  "components": {"sentiment_penalty": 15, "blocker_penalty": 20}
+}
+```
+
+**`POST /cortex/slack/weekly-summary` request:**
+```json
+{
+  "project_id": "erp-proj-001",
+  "week_ref": "2026-W21",
+  "completion_rate": 0.75,
+  "risks": ["API latency unresolved"],
+  "blockers": [],
+  "upcoming_milestones": ["UAT handoff on 2026-05-28"]
+}
+```
+
+---
+
+### Team change
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `POST` | `/cortex/team/change` | `x-api-key` | Handle PM or POC reassignment |
+
+For `pm_reassignment`, CORTEX automatically generates a KT document for the incoming PM.
+
+**Request (`TeamChangePayload`):**
+```json
+{
+  "project_id": "erp-proj-001",
+  "change_type": "pm_reassignment",
+  "outgoing_employee_id": "emp-ananya-001",
+  "incoming_employee_id": "emp-priya-002",
+  "effective_date": "2026-05-28"
+}
+```
+
+**Response:**
+```json
+{
+  "status": "ok",
+  "project_id": "erp-proj-001",
+  "change_type": "pm_reassignment",
+  "message": "Team change processed for erp-proj-001",
+  "kt_document": {
+    "document_id": "doc-uuid-...",
+    "r2_url": "https://r2.../kt-doc.md",
+    "slack_posted": true
+  }
+}
+```
+
+**Valid `change_type` values:** `pm_reassignment`, `poc_added`, `poc_removed`
+
+---
+
+### Calibration events
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `POST` | `/cortex/health/calibrate` | `x-api-key` | Record a manual health re-baseline event |
+
+Used when a PM or director wants to manually reset or annotate the health baseline (e.g., after a major project recovery).
+
+**Request (`CalibratePayload`):**
+```json
+{
+  "project_id": "erp-proj-001",
+  "event_type": "manual_rebaseline",
+  "description": "Scope reduced by client. Health reset to green.",
+  "created_by": "director@company.com",
+  "before_state": {"score": 55, "band": "red"},
+  "after_state": {"score": 82, "band": "green"}
+}
+```
+
+**Response:**
+```json
+{"status": "ok", "event_id": "cal-uuid-..."}
+```
+
+---
+
+### EOD (End-of-Day) reporting
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `POST` | `/cortex/eod/` | `x-api-key` | Submit a daily EOD report |
+| `POST` | `/cortex/eod/{project_id}/weekly/{week_start}/compute` | `x-api-key` | Compute weekly health from EOD reports |
+| `GET` | `/cortex/eod/{project_id}/weekly/{week_start}` | No | Read stored weekly EOD health |
+
+EOD health scores are separate from the standard meeting-based health scores. They are computed from the week's EOD submissions and stored independently.
+
+**`POST /cortex/eod/` request (`EODReportRequest`):**
+```json
+{
+  "project_id": "erp-proj-001",
+  "reporter_id": "emp-dev-003",
+  "report_date": "2026-05-21",
+  "status": "blocked",
+  "summary": "Auth integration blocked on DevOps response.",
+  "tasks_completed": [{"task": "Wrote unit tests for billing module"}],
+  "tasks_blocked": [{"task": "Auth service integration", "assignee": "DevOps team"}]
+}
+```
+
+**Valid `status` values:** `on_track`, `at_risk`, `blocked`, `leave`
+
+**Weekly EOD health response (`WeeklyEODHealth`):**
+```json
+{
+  "project_id": "uuid-...",
+  "week_start": "2026-05-18",
+  "score": 68,
+  "band": "amber",
+  "components": {"blocked_count": 2, "on_track_count": 3},
+  "eod_count": 5,
+  "created_at": "2026-05-21T07:00:00"
+}
+```
+
+---
+
+### Complete endpoint reference table
+
+| Method | Path | Auth Required | Router file |
+|---|---|---|---|
+| `GET` | `/` | No | `main.py` |
+| `GET` | `/healthz` | No | `main.py` |
+| `GET` | `/cortex/health/{project_id}` | No | `main.py` |
+| `GET` | `/cortex/health/{project_id}/weekly/{week_start}` | No | `main.py` |
+| `POST` | `/cortex/health/{project_id}/weekly/{week_start}/compute` | No | `main.py` |
+| `POST` | `/cortex/ingest-nerve` | `x-api-key` | `routers/nerve.py` |
+| `POST` | `/cortex/chat` | No | `routers/chat.py` |
+| `POST` | `/cortex/document-upload` | `x-api-key` | `routers/documents.py` |
+| `POST` | `/cortex/documents/approve` | `x-api-key` | `routers/documents.py` |
+| `POST` | `/cortex/documents/status-report` | No | `routers/documents.py` |
+| `POST` | `/cortex/documents/kt-document` | No | `routers/documents.py` |
+| `POST` | `/cortex/documents/milestone-deliverable` | No | `routers/documents.py` |
+| `POST` | `/cortex/slack/health-alert` | `x-api-key` | `routers/slack.py` |
+| `POST` | `/cortex/slack/action-brief` | `x-api-key` | `routers/slack.py` |
+| `POST` | `/cortex/slack/weekly-summary` | `x-api-key` | `routers/slack.py` |
+| `POST` | `/cortex/team/change` | `x-api-key` | `routers/team_change.py` |
+| `POST` | `/cortex/health/calibrate` | `x-api-key` | `routers/calibrate.py` |
+| `POST` | `/cortex/eod/` | `x-api-key` | `routers/eod.py` |
+| `POST` | `/cortex/eod/{project_id}/weekly/{week_start}/compute` | `x-api-key` | `routers/eod.py` |
+| `GET` | `/cortex/eod/{project_id}/weekly/{week_start}` | No | `routers/eod.py` (via main) |
+
+Interactive Swagger docs are always available at `http://localhost:8004/docs`.
+
+---
+
+## Key data models
+
+All models live in `cortex/models/schemas.py`. Here are the most important ones:
+
+### `NERVEEvent`
+The payload IRIS sends to trigger ingestion. Contains `project_id`, `meeting_id`, `meeting_date`, and nested `InsightsYAML`.
+
+### `InsightsYAML`
+The structured meeting extraction from IRIS. Contains `risks`, `blockers`, `sentiment`, `milestones`, and `summary`. This is stored directly in the DB after ingestion.
+
+### `ProjectHealthScore`
+The computed health output. Fields: `project_id`, `score` (0–100), `band` (green/amber/red), `components` (penalty breakdown), `computed_at`.
+
+### `EODReportRequest` / `EODReportResponse`
+Daily end-of-day submission per team member. Contains `status`, `summary`, and lists of completed/blocked tasks.
+
+### `WeeklyEODHealth`
+Aggregated health from a week's worth of EOD reports. Separate from the meeting-based `ProjectHealthScore`.
+
+### `ChatRequest` / `ChatResponse`
+Input for the chat endpoint. The response includes the LLM answer, current health score, and the meeting IDs used as sources.
+
+### `DocumentRequest` / `DocumentResponse`
+Input for document generation. The response contains the generated `content` as markdown text.
+
+---
+
+## Scheduled jobs
+
+CORTEX runs four recurring background jobs via APScheduler (all times in IST by default):
+
+| Job | Schedule | Config var | Description |
+|---|---|---|---|
+| Weekly plans | Monday 07:30 | `WEEKLY_PLAN_TIME` | Generate weekly work plans for all active projects |
+| Daily health scan | Daily 08:00 | `HEALTH_SCAN_TIME` | Re-score all projects; send alerts where needed |
+| Cadence check | Monday 09:00 | `CADENCE_CHECK_TIME` | Flag projects missing client meetings |
+| Weekly EOD health | Sunday 07:00 | `WEEKLY_HEALTH_TIME` | Aggregate EOD reports into weekly scores |
+
+The scheduler is started in the FastAPI lifespan handler and stopped on shutdown.
+
+---
+
+## Configuration & environment variables
+
+Copy `.env.example` to `.env` and fill in values before running.
+
+### Database
+| Variable | Default | Description |
 |---|---|---|
-| GET | `/cortex/health` | Health check |
-| GET | `/` | Root |
-| POST | `/cortex/ingest-nerve` | IRIS NERVE event → 7-step pipeline |
-| POST | `/cortex/chat` | Intranet chatbot |
-| POST | `/cortex/document-upload` | Register PM-uploaded doc |
-| POST | `/cortex/documents/approve` | Approve a document |
-| POST | `/cortex/documents/status-report` | Generate weekly status report |
-| POST | `/cortex/documents/kt-document` | Generate KT document |
-| POST | `/cortex/documents/milestone-deliverable` | Generate milestone deliverable |
-| POST | `/cortex/slack/health-alert` | Post health alert to Slack |
-| POST | `/cortex/slack/action-brief` | Post action brief to Slack |
-| POST | `/cortex/slack/weekly-summary` | Post weekly summary to Slack |
-| POST | `/cortex/team-change` | ERP PM reassignment webhook |
-| POST | `/cortex/calibrate` | Create calibration event |
+| `DATABASE_URL` | `postgresql://cortex_user:cortex_pass@localhost:5432/cortex_db` | PostgreSQL connection string (asyncpg format) |
+| `DATABASE_POOL_SIZE` | `10` | Connection pool size |
+| `DATABASE_MAX_OVERFLOW` | `20` | Max overflow connections |
+
+### LLM
+| Variable | Default | Description |
+|---|---|---|
+| `ANTHROPIC_API_KEY` | — | Claude API key (required for narrative, documents, chat) |
+| `ANTHROPIC_MODEL` | `claude-sonnet-4-20250514` | Claude model to use |
+| `OPENAI_API_KEY` | — | OpenAI key for embeddings (`text-embedding-3-small`) |
+| `GROQ_API_KEY` | — | Optional Groq key for lightweight LLM calls |
+| `GROQ_MODEL` | `llama-3.1-8b-instant` | Groq model |
+
+### External services
+| Variable | Default | Description |
+|---|---|---|
+| `IRIS_API_BASE_URL` | `http://localhost:8000` | IRIS service (sends NERVEEvents to CORTEX) |
+| `IRIS_API_KEY` | — | Auth key for IRIS |
+| `CELL_API_BASE_URL` | `http://localhost:8002` | CELL task tracking service |
+| `CELL_API_KEY` | — | Auth key for CELL |
+| `ERP_API_BASE_URL` | — | ERP system for project/employee data |
+| `ERP_API_KEY` | — | Auth key for ERP |
+| `INTRANET_API_BASE_URL` | — | Intranet for employee lookups |
+| `INTRANET_API_KEY` | — | Auth key for Intranet |
+| `SLACK_BOT_TOKEN` | — | Slack bot token (`xoxb-...`) |
+| `SLACK_SIGNING_SECRET` | — | Slack signing secret |
+
+### CORTEX service
+| Variable | Default | Description |
+|---|---|---|
+| `CORTEX_HOST` | `0.0.0.0` | Bind address |
+| `CORTEX_PORT` | `8004` | Port |
+| `CORTEX_API_KEY` | — | API key for protected endpoints (omit to disable auth in dev) |
+| `CORTEX_ENV` | `development` | `development` or `production` |
+| `TZ` | `Asia/Kolkata` | Timezone for scheduler |
+
+### Health score thresholds
+| Variable | Default | Description |
+|---|---|---|
+| `HEALTH_SCORE_RED_THRESHOLD` | `60` | Below this = red |
+| `HEALTH_SCORE_AMBER_THRESHOLD` | `80` | Below this = amber |
+| `BLOCKER_ALERT_DAYS` | `2` | Blocker age (days) before penalty applies |
+| `SENTIMENT_DECLINE_WINDOW` | `3` | Meetings to look back for sentiment trend |
+| `CADENCE_GAP_DAYS_CLIENT` | `14` | Days without client meeting before alert |
+| `RENEWAL_SIGNAL_WEEKS` | `6` | Weeks before contract end to flag renewal |
 
 ---
 
-## Setup
+## Running locally
 
-### Prerequisites
-
-- Python 3.11+
-- PostgreSQL with `pgvector` extension (`CREATE EXTENSION IF NOT EXISTS vector;`)
-- Cloudflare R2 bucket (shared with IRIS and CELL, named `erp-agents`)
-- Anthropic API key (Claude — narrative, documents, chat)
-- OpenAI API key (embeddings only — `text-embedding-3-small`)
-
-### Install
-
+**1. Install dependencies:**
 ```bash
 pip install -r requirements-cortex.txt
 ```
 
-### Environment Variables
-
-Copy `.env` and fill in:
-
-```env
-# Database
-DATABASE_URL=postgresql+asyncpg://cortex_user:cortex_pass@localhost:5432/cortex_db
-
-# R2
-R2_ENDPOINT_URL=https://<account>.r2.cloudflarestorage.com
-R2_ACCESS_KEY_ID=...
-R2_SECRET_ACCESS_KEY=...
-R2_BUCKET_NAME=erp-agents
-
-# LLM
-ANTHROPIC_API_KEY=sk-ant-...
-ANTHROPIC_MODEL=claude-sonnet-4-20250514
-OPENAI_API_KEY=sk-...
-
-# Groq (chat fallback)
-GROQ_API_KEY=...
-GROQ_MODEL=llama-3.1-8b-instant
-
-# Slack (build capability, activate when UI decided)
-SLACK_BOT_TOKEN=xoxb-...
-SLACK_SIGNING_SECRET=...
-
-# Internal services
-CELL_API_BASE_URL=http://localhost:8002
-CELL_API_KEY=...
-ERP_API_BASE_URL=https://erp.internal
-ERP_API_KEY=...
-INTRANET_API_BASE_URL=https://intranet.internal/api
-INTRANET_API_KEY=...
-
-# CORTEX
-CORTEX_HOST=0.0.0.0
-CORTEX_PORT=8004
-CORTEX_API_KEY=...
-CORTEX_ENV=development
-
-# Timezone
-TZ=Asia/Kolkata
-
-# Thresholds
-HEALTH_SCORE_RED_THRESHOLD=60
-HEALTH_SCORE_AMBER_THRESHOLD=80
-BLOCKER_ALERT_DAYS=2
-SENTIMENT_DECLINE_WINDOW=3
-CADENCE_GAP_DAYS_CLIENT=14
-RENEWAL_SIGNAL_WEEKS=6
+**2. Configure environment:**
+```bash
+cp .env.example .env
+# Edit .env with your DB URL, API keys, etc.
 ```
 
-### Run
-
+**3. Start the service:**
 ```bash
-# From project root
+# Option A — module entry point
 python -m cortex.main
 
-# Or directly
+# Option B — uvicorn with reload (dev)
 uvicorn cortex.main:app --host 0.0.0.0 --port 8004 --reload
 ```
 
-Swagger UI: `http://localhost:8004/docs`
-
-### Seed + Test
-
-```bash
-python seed_and_test.py
+**4. Open Swagger UI:**
+```
+http://localhost:8004/docs
 ```
 
-This creates test projects, inserts mock meeting data, runs the full ingest pipeline, and verifies health scores and memory stitching. See `TESTING_GUIDE.md` for details.
+**5. Run tests:**
+```bash
+pytest tests/
+```
 
 ---
 
-## Integration Wires
+## External dependencies
 
-| From | To | Mechanism |
-|---|---|---|
-| IRIS | CORTEX | `POST /cortex/ingest-nerve` (NERVE event after every extraction) |
-| CORTEX | CELL | `GET /cell/summary/{project_id}` (weekly velocity — CELL must implement this) |
-| CORTEX | CELL | `POST /cell/ingest-tasks` (POC todos on Monday plan) |
-| Intranet | CORTEX | `POST /cortex/document-upload` (on PM file upload) |
-| Intranet | CORTEX | `POST /cortex/chat` (project page chatbot, with X-Employee-ID) |
-| Intranet | CORTEX | `POST /cortex/team-change` (on PM/POC reassignment) |
-| ERP | CORTEX | `POST /cortex/team-change` (PM reassignment webhook) |
-| CORTEX | ERP | `PATCH /api/milestones/:id` (on milestone deliverable approved) |
-| CORTEX | Slack | Slack SDK (deferred — build now, wire when UI decided) |
-
----
-
-## Known Gaps (Pre–Go-Live)
-
-| # | Issue | Severity |
-|---|---|---|
-| 1 | CELL `/cell/summary` endpoint not yet implemented | Critical |
-| 2 | Intranet must pass `X-Employee-ID` in chat requests | High |
-| 3 | IRIS hashes external attendees — stakeholder profiles need IRIS-side fix | High |
-| 4 | ERP must expose `PATCH /api/milestones/:id` | Medium |
-| 5 | Slack delivery built but not activated | Low |
-| 6 | `pgvector` extension must be enabled on `cortex_db` | Critical |
+| Dependency | Purpose |
+|---|---|
+| `fastapi` + `uvicorn` | HTTP server |
+| `asyncpg` | Async PostgreSQL (with pgvector for embeddings) |
+| `anthropic` | Claude LLM for narrative, documents, chat |
+| `openai` | `text-embedding-3-small` for pgvector semantic search |
+| `groq` | Optional lightweight LLM |
+| `boto3` | Cloudflare R2 document storage |
+| `slack-sdk` | Slack bot messaging |
+| `apscheduler` | Recurring background jobs |
+| `pydantic` v2 | Request/response validation |
+| `python-dotenv` | `.env` loading |
+| `httpx` | Async HTTP client for integration calls |
+| `pyyaml` | YAML parsing for enriched meeting files |
 
 ---
 
-## Design Decisions
+## Concepts for new readers
 
-**Health score is deterministic, not LLM.** Auditable, testable, no hallucination risk on a number PMs act on. LLM is reserved for narrative and document generation only.
+**Why is there a NERVE event?** IRIS processes meeting transcripts and extracts structured insight. It sends the result to CORTEX as a `NERVEEvent`. CORTEX does not transcribe or extract — it ingests, stores, computes, and acts.
 
-**CORTEX fills `previous_meeting_ref` and `relationship_trajectory`, not IRIS.** IRIS is stateless per meeting. Cross-meeting narrative is CORTEX's sole responsibility.
+**Why is the health score deterministic?** Consistency matters for PM trust. The score uses configurable rules against measurable signals (sentiment score, blocker age, milestone dates). LLMs are used only for narrative text and document content, not for scoring.
 
-**Calibration events are immutable overlays.** When context shifts (POC → Milestone 1, scope change), CORTEX never mutates raw history. A calibration event layers over it. All reporting reads through the calibration lens. Full audit trail always intact.
+**What is "project memory"?** Memory is the stitched cross-meeting state: the last 3 meetings' context (short-term), plus sentiment history, open risks, blockers, and milestone status (long-term). The chat and narrative systems both read from memory.
 
-**`insights_enriched.yaml` is additive, not a replacement.** IRIS output is source of truth. CORTEX enrichment is additive. Any future agent can consume either file.
+**What is the difference between EOD health and project health?** Project health (`/cortex/health/{project_id}`) is computed from meeting insights after each NERVE event. EOD health (`/cortex/eod/...`) is computed weekly from daily team EOD submissions. They serve different audiences and cadences but both produce a score and band.
 
-**Role-aware chat from intranet profile, not self-declaration.** No role spoofing. Consistent. Employee identity resolved server-side from the intranet session.
+**What is a calibration event?** When a project's context changes dramatically (scope reduction, contract amendment, recovery from a crisis), a PM or director can record a calibration event. This creates an audit trail in `calibration_events` but does not automatically overwrite the health score — it is a human annotation.
 
-**Client relationship preserved after project close.** Closed ≠ forgotten. Consultancy is building long-term client relationships. All history queryable indefinitely.
+**Where does project_id normalization happen?** Many callers use the ERP project ID (e.g. `erp-proj-001`). CORTEX maps this to an internal UUID via `normalize_project_id()` in `models/db.py`. All internal operations use the UUID.
 
-**Slack delivery capability built but not wired.** The intelligence layer is ready. Delivery activates when the notification UI is confirmed.
+**How does auth work?** Protected endpoints check the `x-api-key` header against `CORTEX_API_KEY`. In `development` mode with no key set, auth is skipped. In `production`, a missing or mismatched key returns HTTP 403.
