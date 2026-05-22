@@ -470,40 +470,7 @@ CREATE TABLE IF NOT EXISTS project_documents (
 -- ─────────────────────────────────────────────────────────────────────────
 -- EOD REPORTS
 -- ─────────────────────────────────────────────────────────────────────────
-
-CREATE TABLE IF NOT EXISTS project_eod_reports (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    project_id UUID NOT NULL REFERENCES projects(id),
-    reporter_id TEXT NOT NULL,
-    report_date DATE NOT NULL,
-    status TEXT NOT NULL CHECK (status IN ('on_track','at_risk','blocked','leave')) DEFAULT 'on_track',
-    summary TEXT,
-    tasks_completed JSONB DEFAULT '[]',
-    tasks_blocked JSONB DEFAULT '[]',
-    leave_reason TEXT,
-    created_at TIMESTAMPTZ DEFAULT NOW()
-);
-
-CREATE UNIQUE INDEX IF NOT EXISTS idx_eod_reports_project_reporter_date
-    ON project_eod_reports(project_id, reporter_id, report_date);
-
--- ─────────────────────────────────────────────────────────────────────────
--- WEEKLY EOD HEALTH
--- ─────────────────────────────────────────────────────────────────────────
-
-CREATE TABLE IF NOT EXISTS project_weekly_health (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    project_id UUID NOT NULL REFERENCES projects(id),
-    week_start DATE NOT NULL,
-    score INTEGER NOT NULL CHECK (score BETWEEN 0 AND 100),
-    band TEXT NOT NULL CHECK (band IN ('green','amber','red')),
-    components JSONB NOT NULL,
-    eod_count INTEGER NOT NULL,
-    created_at TIMESTAMPTZ DEFAULT NOW()
-);
-
-CREATE UNIQUE INDEX IF NOT EXISTS idx_weekly_health_project_week
-    ON project_weekly_health(project_id, week_start);
+-- EOD reporting and weekly EOD health removed.
 
 -- ─────────────────────────────────────────────────────────────────────────
 -- PM TASK PLANS (WEEKLY)
@@ -517,7 +484,6 @@ CREATE TABLE IF NOT EXISTS pm_task_plans (
     plan_yaml TEXT NOT NULL,
     health_score_at_generation INTEGER,
     velocity_data JSONB,
-    sent_to_slack BOOLEAN DEFAULT FALSE,
     pm_acknowledged BOOLEAN DEFAULT FALSE
 );
 
@@ -560,8 +526,8 @@ CREATE INDEX IF NOT EXISTS idx_stakeholder_sentiment_log_stakeholder ON stakehol
 async def init_schema():
     """Initialize database schema"""
     if not _pool:
-        print("[WARN] No database connection. Skipping schema init.")
-        return True
+        print("[ERROR] No database connection. Cannot initialize schema.")
+        return False
 
     conn = await _pool.acquire()
     try:
@@ -613,8 +579,7 @@ async def init_schema():
         print("[OK] Database schema initialized")
         return True
     except Exception as e:
-        print(f"[WARN] Schema init failed: {e}")
-        print("Continuing in stub mode...")
-        return True
+        print(f"[ERROR] Schema init failed: {e}")
+        return False
     finally:
         await _pool.release(conn)

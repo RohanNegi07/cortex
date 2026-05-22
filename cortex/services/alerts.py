@@ -1,24 +1,22 @@
-"""Alerting wrappers for Slack notifications."""
+"""Alerting wrappers.
 
-from cortex.services.slack_notifier import (
-    send_health_alert as _send_health_alert,
-    send_action_brief as _send_action_brief,
-    send_weekly_summary as _send_weekly_summary,
-    send_document_ready as _send_document_ready,
-)
-
+This module intentionally left as a thin wrapper for alerting
+APIs to preserve imports across the codebase. Slack/EOD
+functionality has been disabled; callers should import from
+`cortex.services.alerts` but no external posts will occur.
+"""
 
 async def send_health_alert(*args, **kwargs):
-    return await _send_health_alert(*args, **kwargs)
+    return False
 
 
 async def send_action_brief(*args, **kwargs):
-    return await _send_action_brief(*args, **kwargs)
+    return False
 
 
 async def send_weekly_summary(*args, **kwargs):
-    return await _send_weekly_summary(*args, **kwargs)
+    return False
 
 
 async def send_document_ready(*args, **kwargs):
-    return await _send_document_ready(*args, **kwargs)
+    return False

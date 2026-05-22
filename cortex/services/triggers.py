@@ -4,14 +4,13 @@ Conditional actions after ingestion:
 - Generate action brief for client-call/milestone-review meetings
 - Auto-draft milestone deliverable on completion
 - Flag blockers > 48h unresolved
-- Send health alert if score changed
+- Detect health score changes (Slack notifications disabled)
 """
 
 import json
 import logging
 from typing import Optional, Dict, Any
 from datetime import datetime, timedelta
-import asyncpg
 from cortex.models.db import get_connection, release_connection
 
 log = logging.getLogger("cortex.triggers")
@@ -24,76 +23,38 @@ async def trigger_health_alert_if_changed(
 ) -> bool:
     """
     Check if health score changed from previous.
-    If band changed or score_delta > threshold, send Slack alert.
+    If band changed or score_delta > threshold, record that an alert would have been sent.
     """
     try:
-        from cortex.services.slack_notifier import send_health_alert
-
         conn = await get_connection()
         try:
             # Get previous health score
-            prev_health = await conn.fetchrow(
+            prev_row = await conn.fetchrow(
                 """SELECT score, health_band
                    FROM project_health_scores
                    WHERE project_id = $1
                    ORDER BY computed_at DESC
-                   LIMIT 2""",
-                project_id
-            )
-
-            if not prev_health or len(prev_health) < 2:
-                # No previous score to compare
-                return False
-
-            # Get the one before current
-            prev_row = await conn.fetch(
-                """SELECT score, health_band
-                   FROM project_health_scores
-                   WHERE project_id = $1
-                   ORDER BY computed_at DESC
-                   LIMIT 2 OFFSET 1""",
+                   OFFSET 1 LIMIT 1""",
                 project_id
             )
 
             if not prev_row:
                 return False
 
-            prev_score = prev_row[0]["score"]
-            prev_band = prev_row[0]["health_band"]
+            prev_score = prev_row["score"]
+            prev_band = prev_row["health_band"]
 
-            # Determine if alert threshold crossed
             band_changed = prev_band != current_band
             score_delta = abs(current_score - prev_score)
             alert_threshold = 10
 
             if band_changed or score_delta > alert_threshold:
                 log.info(
-                    f"Health alert triggered for {project_id}: "
-                    f"{prev_score}/{prev_band} → {current_score}/{current_band}"
+                    f"Health alert would have triggered for {project_id}: "
+                    f"{prev_score}/{prev_band} → {current_score}/{current_band}. "
+                    "Slack notifications are disabled."
                 )
-
-                # Send to Slack
-                success = await send_health_alert(
-                    project_id=project_id,
-                    score=current_score,
-                    band=current_band,
-                    components={"previous_score": prev_score, "delta": score_delta}
-                )
-
-                if success:
-                    # Log trigger
-                    await conn.execute(
-                        """INSERT INTO agent_actions
-                           (project_id, action_type, payload, triggered_by, status)
-                           VALUES ($1, $2, $3, $4, $5)""",
-                        project_id,
-                        "health_alert",
-                        f"score_change: {prev_score}->{current_score}, band: {current_band}",
-                        "ingest_trigger",
-                        "success"
-                    )
-                    return True
-
+                return False
         finally:
             if conn:
                 await release_connection(conn)

@@ -1,7 +1,6 @@
 """
 CORTEX Scheduler
 APScheduler setup for recurring jobs:
-- Daily health scans
 - Weekly plan generation
 - Cadence monitoring
 - Renewal signals
@@ -14,7 +13,7 @@ from typing import Optional
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-from cortex.config import TIMEZONE, WEEKLY_PLAN_TIME, HEALTH_SCAN_TIME, WEEKLY_HEALTH_TIME
+from cortex.config import TIMEZONE, WEEKLY_PLAN_TIME
 
 log = logging.getLogger("cortex.scheduler")
 
@@ -47,16 +46,6 @@ def init_scheduler() -> AsyncIOScheduler:
     )
     log.info(f"Scheduled: Weekly plans at Monday {WEEKLY_PLAN_TIME}")
 
-    # Daily health scan (08:00)
-    scan_hour, scan_minute = parse_time(HEALTH_SCAN_TIME)
-    scheduler.add_job(
-        health_scan_job,
-        CronTrigger(hour=scan_hour, minute=scan_minute, timezone=TIMEZONE),
-        id="daily_health_scan",
-        name="Daily health scan",
-        replace_existing=True
-    )
-    log.info(f"Scheduled: Daily health scan at {HEALTH_SCAN_TIME}")
 
     # Cadence check (Monday 09:00)
     scheduler.add_job(
@@ -68,16 +57,6 @@ def init_scheduler() -> AsyncIOScheduler:
     )
     log.info("Scheduled: Cadence check on Monday at 09:00")
 
-    # Weekly EOD health computation (Sunday 07:00)
-    health_hour, health_minute = parse_time(WEEKLY_HEALTH_TIME)
-    scheduler.add_job(
-        weekly_eod_health_job,
-        CronTrigger(day_of_week="sun", hour=health_hour, minute=health_minute, timezone=TIMEZONE),
-        id="weekly_eod_health_sunday",
-        name="Compute weekly EOD health",
-        replace_existing=True
-    )
-    log.info(f"Scheduled: Weekly EOD health at Sunday {WEEKLY_HEALTH_TIME}")
 
     # Renewal signal (Sunday 08:00)
     scheduler.add_job(
@@ -104,70 +83,6 @@ async def weekly_plan_job():
         )
     except Exception as e:
         log.error(f"Weekly plan job failed: {e}", exc_info=True)
-
-
-async def weekly_eod_health_job():
-    """Compute weekly EOD health for all projects with reports (Sunday 07:00)"""
-    from cortex.services.eod import compute_weekly_health_for_week
-    from datetime import datetime, timedelta
-
-    log.info("=== WEEKLY EOD HEALTH JOB STARTED ===")
-    try:
-        today = datetime.now()
-        week_start = today.date() - timedelta(days=today.weekday())
-
-        result = await compute_weekly_health_for_week(week_start)
-        log.info(
-            f"Weekly EOD health job completed: {result['computed']}/{result['total_projects']} computed"
-        )
-    except Exception as e:
-        log.error(f"Weekly EOD health job failed: {e}", exc_info=True)
-
-
-async def health_scan_job():
-    """Re-scan all projects and post alerts if score changed (Daily 08:00)"""
-    from cortex.models.db import get_connection, release_connection
-    from cortex.services.slack_notifier import send_health_alert
-
-    log.info("=== DAILY HEALTH SCAN JOB STARTED ===")
-    try:
-        conn = await get_connection()
-        try:
-            # Get all active projects with recent health scores
-            projects = await conn.fetch(
-                """SELECT DISTINCT p.project_id, p.name,
-                     h.score, h.health_band
-                   FROM projects p
-                   LEFT JOIN project_health_scores h ON p.project_id = h.project_id
-                   WHERE p.status = 'active'
-                   ORDER BY h.computed_at DESC"""
-            )
-
-            alert_count = 0
-            for proj in projects:
-                project_id = proj["project_id"]
-                score = proj["score"] or 75
-                band = proj["health_band"] or "amber"
-
-                # Send alert
-                success = await send_health_alert(
-                    project_id=project_id,
-                    score=score,
-                    band=band
-                )
-
-                if success:
-                    alert_count += 1
-                    log.debug(f"Health alert sent for {project_id}")
-
-            log.info(f"Health scan complete: {alert_count} alerts posted")
-
-        finally:
-            if conn:
-                await release_connection(conn)
-
-    except Exception as e:
-        log.error(f"Health scan job failed: {e}", exc_info=True)
 
 
 async def cadence_check_job():

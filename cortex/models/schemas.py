@@ -184,48 +184,7 @@ class ChatResponse(BaseModel):
     sources: List[str] = []  # meeting IDs used for context
     generated_at: datetime
 
-class EODStatus(str, Enum):
-    ON_TRACK = "on_track"
-    AT_RISK = "at_risk"
-    BLOCKED = "blocked"
-    LEAVE = "leave"
-
-class EODTask(BaseModel):
-    task: str
-    status: Optional[str] = None
-    assignee: Optional[str] = None
-    due_date: Optional[date] = None
-
-class EODReportRequest(BaseModel):
-    project_id: str
-    reporter_id: str
-    report_date: date
-    status: EODStatus = EODStatus.ON_TRACK
-    summary: str
-    tasks_completed: List[EODTask] = []
-    tasks_blocked: List[EODTask] = []
-    leave_reason: Optional[str] = None
-
-class EODReportResponse(BaseModel):
-    id: str
-    project_id: str
-    reporter_id: str
-    report_date: date
-    status: EODStatus
-    summary: Optional[str] = None
-    tasks_completed: List[EODTask] = []
-    tasks_blocked: List[EODTask] = []
-    leave_reason: Optional[str] = None
-    created_at: datetime
-
-class WeeklyEODHealth(BaseModel):
-    project_id: str
-    week_start: date
-    score: int
-    band: HealthBand
-    components: Dict[str, Any]
-    eod_count: int
-    created_at: datetime
+# EOD reporting and weekly EOD health have been removed.
 
 # ─────────────────────────────────────────────────────────────────────────────
 # DOCUMENTS

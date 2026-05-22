@@ -10,6 +10,7 @@ import logging
 from typing import Optional, Dict, Any
 from datetime import datetime, date, timedelta
 import asyncpg
+from cortex.integrations.cell_api import get_velocity_summary
 from cortex.models.db import get_connection, release_connection
 from cortex.models.schemas import HealthBand
 
@@ -167,9 +168,23 @@ async def compute_health_score(
             trajectory_penalty = 10
         components["trajectory_penalty"] = trajectory_penalty
 
-        # ── VELOCITY (stub — would fetch from CELL)
-        # TODO: Implement CELL velocity integration
+        # ── VELOCITY (CELL integration)
         velocity_penalty = 0
+        try:
+            week_ref = f"{datetime.utcnow().isocalendar()[0]}-W{datetime.utcnow().isocalendar()[1]:02d}"
+            velocity_data = await get_velocity_summary(project_id, week_ref)
+            if velocity_data and isinstance(velocity_data, dict):
+                completion_rate = float(velocity_data.get("completion_rate", 1.0))
+                if completion_rate < 0.5:
+                    velocity_penalty = 15
+                elif completion_rate < 0.7:
+                    velocity_penalty = 8
+                elif completion_rate < 0.85:
+                    velocity_penalty = 5
+            else:
+                log.warning(f"Velocity data unavailable for {project_id}")
+        except Exception as e:
+            log.warning(f"Velocity integration failed for {project_id}: {e}")
         components["velocity_penalty"] = velocity_penalty
 
         # ── ARTIFACT SIGNALS FROM NERVE

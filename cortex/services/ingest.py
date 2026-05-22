@@ -13,7 +13,6 @@ from cortex.models.db import (
     insert_health_score,
     release_connection,
     normalize_project_id,
-    create_or_get_project,
 )
 from cortex.models.schemas import InsightsYAML
 from cortex.config import OPENAI_API_KEY, EMBEDDING_MODEL
@@ -35,20 +34,11 @@ async def ingest_meeting_insights(
     try:
         conn = await get_connection()
 
-        # Normalize or create the project for local stub tests
+        # Normalize the project ID to the internal UUID.
         normalized_project_id = await normalize_project_id(project_id)
         if not normalized_project_id:
-            log.warning(f"Project {project_id} not found. Creating local stub project record.")
-            created_project = await create_or_get_project(
-                erp_project_id=project_id,
-                project_name=f"Local stub project {project_id}",
-                project_type="client",
-                client_id=None,
-                pm_employee_id="local-pm",
-                start_date=None,
-                end_date=None,
-            )
-            normalized_project_id = created_project["id"]
+            log.error(f"Project {project_id} not found")
+            return None
         project_id = normalized_project_id
 
         # 1. Check if already ingested (duplicate prevention)

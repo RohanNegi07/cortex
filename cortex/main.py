@@ -14,10 +14,9 @@ from datetime import datetime, date
 
 from cortex.config import CORTEX_HOST, CORTEX_PORT, CORTEX_ENV, CORTEX_API_KEY
 from cortex.models.db import init_db, close_db, init_schema, normalize_project_id, get_latest_health_score
-from cortex.models.schemas import HealthCheckResponse, ProjectHealthScore, WeeklyEODHealth
-from cortex.routers import nerve, chat, documents, slack, team, calibrate, eod
+from cortex.models.schemas import HealthCheckResponse, ProjectHealthScore
+from cortex.routers import nerve
 from cortex.scheduler import start_scheduler, stop_scheduler
-from cortex.services.eod import compute_weekly_health, get_weekly_health
 
 # ─────────────────────────────────────────────────────────────────────────────
 # LOGGING
@@ -40,11 +39,13 @@ async def lifespan(app: FastAPI):
     log.info(f"CORTEX starting... (env: {CORTEX_ENV})")
     db_ok = await init_db()
     if not db_ok:
-        log.warning("Database init returned False. Continuing in stub mode.")
+        log.error("Database init returned False. Shutting down.")
+        raise RuntimeError("Database connection failed")
 
     schema_ok = await init_schema()
     if not schema_ok:
-        log.warning("Schema init returned False. Continuing in stub mode.")
+        log.error("Schema init returned False. Shutting down.")
+        raise RuntimeError("Database schema initialization failed")
 
     # Start scheduler
     try:
@@ -119,30 +120,6 @@ async def project_health_report(project_id: str):
     )
 
 
-@app.post("/cortex/health/{project_id}/weekly/{week_start}/compute", response_model=WeeklyEODHealth)
-async def compute_project_weekly_health(project_id: str, week_start: date):
-    """Compute weekly health from EOD reports for a given project and week."""
-    internal_project_id = await normalize_project_id(project_id)
-    if not internal_project_id:
-        raise HTTPException(status_code=404, detail="Project not found")
-
-    health = await compute_weekly_health(internal_project_id, week_start)
-    if not health:
-        raise HTTPException(status_code=404, detail="Weekly health could not be computed")
-    return health
-
-@app.get("/cortex/health/{project_id}/weekly/{week_start}", response_model=WeeklyEODHealth)
-async def get_project_weekly_health(project_id: str, week_start: date):
-    """Read the weekly EOD health report for a project."""
-    internal_project_id = await normalize_project_id(project_id)
-    if not internal_project_id:
-        raise HTTPException(status_code=404, detail="Project not found")
-
-    health = await get_weekly_health(internal_project_id, week_start)
-    if not health:
-        raise HTTPException(status_code=404, detail="Weekly health not found")
-    return health
-
 # ─────────────────────────────────────────────────────────────────────────────
 # API KEY MIDDLEWARE
 # ─────────────────────────────────────────────────────────────────────────────
@@ -164,12 +141,6 @@ async def verify_api_key(api_key: str = Header(None)):
 # ─────────────────────────────────────────────────────────────────────────────
 
 app.include_router(nerve.router)
-app.include_router(chat.router)
-app.include_router(documents.router)
-app.include_router(slack.router)
-app.include_router(team.router)
-app.include_router(calibrate.router)
-app.include_router(eod.router)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ROOT

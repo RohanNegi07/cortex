@@ -13,7 +13,6 @@ from cortex.config import ANTHROPIC_API_KEY, ANTHROPIC_MODEL
 from cortex.models.db import get_connection, release_connection
 from cortex.integrations.cell_api import get_velocity_summary, push_tasks_to_cell
 from cortex.integrations.intranet import resolve_project_details, resolve_employee_details
-from cortex.services.slack_notifier import send_weekly_summary
 from cortex.llm.prompts.weekly_plan import build_weekly_plan_prompt
 
 log = logging.getLogger("cortex.weekly_plan")
@@ -34,7 +33,7 @@ async def generate_weekly_plan(
 ) -> Optional[Dict[str, Any]]:
     """
     Generate weekly plan for a single project.
-    Returns: {status, plan_id, plan_content, todos_pushed, slack_posted}
+    Returns: {status, plan_id, plan_content, todos_pushed}
     """
     try:
         conn = await get_connection()
@@ -54,12 +53,15 @@ async def generate_weekly_plan(
 
             external_project_id = project["erp_project_id"]
             project_details = await resolve_project_details(external_project_id)
+            if not project_details:
+                log.error(f"Project details unavailable for {external_project_id}")
+                return None
 
             # Get velocity summary from CELL
             velocity = await get_velocity_summary(project_id, week_ref)
             if not velocity:
-                log.warning(f"Could not get velocity for {project_id}")
-                velocity = {"completion_rate": 0.7}
+                log.error(f"Could not get velocity for {project_id}")
+                return None
 
             # Get health score
             health = await conn.fetchrow(
@@ -118,7 +120,7 @@ async def generate_weekly_plan(
             )
 
             # Generate plan via Claude
-            plan_content = "ERROR: Could not generate plan"
+            plan_content = None
             if claude_client:
                 try:
                     response = claude_client.messages.create(
@@ -132,33 +134,21 @@ async def generate_weekly_plan(
                 except Exception as e:
                     log.error(f"Claude error generating plan: {e}")
             else:
-                log.warning("Claude client not available, using stub plan")
-                plan_content = f"""focus_areas:
-  - Continue milestone execution
-  - Monitor health score ({health_status})
-  - Manage open risks ({len(risks)})
+                log.error("Claude client not available for weekly plan generation")
 
-poc_todos:
-  - task: "Review weekly progress"
-    priority: "high"
-    assignee: "POC Lead"
-    due_date: "{datetime.utcnow().strftime('%Y-%m-%d')}"
-
-documents_due: []
-
-risks_to_watch: []
-
-recommendation: "Maintain current velocity. Monitor upcoming milestones."
-"""
+            if not plan_content:
+                log.error(f"Weekly plan generation failed for {project_id}")
+                return None
 
             # Parse plan YAML
             try:
                 plan_yaml = yaml.safe_load(plan_content)
                 if not isinstance(plan_yaml, dict):
-                    plan_yaml = {"focus_areas": [], "poc_todos": [], "documents_due": [], "risks_to_watch": []}
-            except:
-                log.warning("Could not parse plan YAML, using default")
-                plan_yaml = {"focus_areas": [], "poc_todos": [], "documents_due": [], "risks_to_watch": []}
+                    log.error(f"Invalid weekly plan format generated for {project_id}")
+                    return None
+            except Exception as e:
+                log.error(f"Could not parse plan YAML for {project_id}: {e}")
+                return None
 
             # Insert pm_task_plans
             plan_id = f"plan_{project_id}_{week_ref}"
@@ -180,22 +170,6 @@ recommendation: "Maintain current velocity. Monitor upcoming milestones."
             if poc_todos:
                 todos_pushed = await push_tasks_to_cell(project_id, poc_todos, external_project_id=external_project_id)
 
-            # Post to Slack
-            slack_posted = False
-            try:
-                slack_posted = await send_weekly_summary(
-                    project_id=external_project_id,
-                    week_ref=week_ref,
-                    summary={
-                        "completion_rate": velocity.get("completion_rate", 0.7),
-                        "risks": risks,
-                        "blockers": [],
-                        "upcoming_milestones": [m["name"] for m in milestones]
-                    }
-                )
-            except Exception as e:
-                log.warning(f"Could not post to Slack: {e}")
-
             # Log action
             await conn.execute(
                 """INSERT INTO agent_actions
@@ -215,7 +189,6 @@ recommendation: "Maintain current velocity. Monitor upcoming milestones."
                 "week_ref": week_ref,
                 "plan_content": plan_content,
                 "todos_pushed": todos_pushed,
-                "slack_posted": slack_posted
             }
 
         finally:

@@ -54,26 +54,10 @@ async def get_velocity_summary(
 
     except httpx.HTTPError as e:
         log.error(f"CELL API error fetching velocity: {e}")
-        return get_mock_velocity_summary(project_id, week_ref)
+        return None
     except Exception as e:
         log.error(f"Failed to get velocity summary: {e}")
-        return get_mock_velocity_summary(project_id, week_ref)
-
-
-def get_mock_velocity_summary(project_id: str, week_ref: str) -> Dict[str, Any]:
-    """Return mock velocity data when CELL is unavailable"""
-    return {
-        "project_id": project_id,
-        "week_ref": week_ref,
-        "tasks_planned": 8,
-        "tasks_completed": 6,
-        "tasks_carried": 1,
-        "tasks_blocked": 1,
-        "completion_rate": 0.75,
-        "bounty_earned": 15.0,
-        "per_intern": [],
-        "cumulative_completion_rate": 0.72
-    }
+        return None
 
 
 async def push_tasks_to_cell(

@@ -139,11 +139,8 @@ async def update_narrative(project_id: str) -> Optional[Dict[str, Any]]:
                 log.warning(f"GROQ narrative failed: {e}")
 
         if narrative is None:
-            log.warning("Using stub narrative fallback.")
-            narrative = {
-                "trend": "stable",
-                "narrative": "Project proceeding as planned."
-            }
+            log.warning("Narrative generation unavailable or failed.")
+            return None
 
         # 4. Update project_memory
         trajectory = {

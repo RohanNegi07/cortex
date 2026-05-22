@@ -11,7 +11,6 @@ from typing import Optional, Dict, Any
 from cortex.config import ANTHROPIC_API_KEY, ANTHROPIC_MODEL
 from cortex.models.db import get_connection, release_connection
 from cortex.integrations.intranet import resolve_employee_details, resolve_project_details
-from cortex.services.slack_notifier import send_document_ready
 from cortex.llm.prompts.kt import build_kt_prompt
 
 log = logging.getLogger("cortex.kt")
@@ -35,7 +34,7 @@ async def generate_kt_document(
 ) -> Optional[Dict[str, Any]]:
     """
     Generate KT document for PM transition.
-    Returns: {status, document_id, r2_url, slack_posted}
+    Returns: {status, document_id, r2_url}
     """
     try:
         conn = await get_connection()
@@ -51,6 +50,9 @@ async def generate_kt_document(
 
             external_project_id = project["erp_project_id"]
             project_details = await resolve_project_details(external_project_id)
+            if not project_details:
+                log.error(f"Project details unavailable for {external_project_id}")
+                return None
             outgoing_pm = await resolve_employee_details(outgoing_employee_id)
             incoming_pm = await resolve_employee_details(incoming_employee_id)
 
@@ -160,7 +162,7 @@ async def generate_kt_document(
             )
 
             # Generate KT document via Claude
-            kt_content = "ERROR: Could not generate KT document"
+            kt_content = None
             if claude_client:
                 try:
                     response = claude_client.messages.create(
@@ -174,31 +176,11 @@ async def generate_kt_document(
                 except Exception as e:
                     log.error(f"Claude error generating KT: {e}")
             else:
-                log.warning("Claude client not available, using stub KT document")
-                kt_content = f"""# Knowledge Transfer: {project_details.get('name')}
+                log.error("Claude client not available for KT generation")
 
-## Overview
-{project_overview}
-
-## Current Status
-- Health: {health['health_band'] if health else 'amber'}
-- Score: {health['score'] if health else 75}/100
-
-## Milestones
-{milestone_status_text}
-
-## Key Risks
-{risks_text or "None"}
-
-## Team Contacts
-{stakeholders_text}
-
-## Next Steps
-1. Review all recent meeting notes
-2. Call with outgoing PM
-3. Meet with client stakeholders
-4. Review project memory and decisions
-"""
+            if not kt_content:
+                log.error(f"KT generation failed for {project_id}")
+                return None
 
             filename = f"kt_document_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.md"
             document_path = f"generated/{project_id}/{filename}"
@@ -217,19 +199,6 @@ async def generate_kt_document(
                 document_path
             )
 
-            # Send to incoming PM via Slack
-            slack_posted = False
-            if incoming_pm and incoming_pm.get("email"):
-                try:
-                    slack_posted = await send_document_ready(
-                        project_id=external_project_id,
-                        doc_type="kt_document",
-                        r2_url=f"https://cortex.example.com/{document_path}",
-                        pm_email=incoming_pm.get("email")
-                    )
-                except Exception as e:
-                    log.warning(f"Could not post KT to Slack: {e}")
-
             # Log action
             await conn.execute(
                 """INSERT INTO agent_actions
@@ -246,8 +215,7 @@ async def generate_kt_document(
                 "status": "ok",
                 "project_id": project_id,
                 "document_id": doc_id,
-                "r2_url": f"https://cortex.example.com/{document_path}",
-                "slack_posted": slack_posted
+                "r2_url": f"https://cortex.example.com/{document_path}"
             }
 
         finally:

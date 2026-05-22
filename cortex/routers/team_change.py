@@ -101,8 +101,7 @@ async def post_team_change(
         if kt_result:
             response["kt_document"] = {
                 "document_id": kt_result.get("document_id"),
-                "r2_url": kt_result.get("r2_url"),
-                "slack_posted": kt_result.get("slack_posted")
+                "r2_url": kt_result.get("r2_url")
             }
 
         return response

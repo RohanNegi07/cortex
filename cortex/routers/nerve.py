@@ -8,7 +8,7 @@ from pydantic import BaseModel
 import logging
 from datetime import date, datetime
 from cortex.models.schemas import NERVEEvent
-from cortex.models.db import normalize_project_id, create_or_get_project
+from cortex.models.db import normalize_project_id
 from cortex.services.ingest import ingest_meeting_insights
 from cortex.services.memory import stitch_meeting_memory
 from cortex.services.narrative import update_narrative
@@ -43,20 +43,11 @@ async def ingest_nerve(
         project_id = event.project_id
         meeting_id = event.meeting_id
 
-        # Normalize or create the project so the full pipeline uses internal UUIDs.
+        # Normalize the project ID so the full pipeline uses internal UUIDs.
         internal_project_id = await normalize_project_id(project_id)
         if not internal_project_id:
-            log.warning(f"Project {project_id} not found. Creating local stub project record.")
-            created_project = await create_or_get_project(
-                erp_project_id=project_id,
-                project_name=f"Local stub project {project_id}",
-                project_type="client",
-                client_id=None,
-                pm_employee_id="local-pm",
-                start_date=None,
-                end_date=None,
-            )
-            internal_project_id = created_project["id"]
+            log.error(f"Project {project_id} not found")
+            raise HTTPException(status_code=404, detail="Project not found")
         project_id = internal_project_id
 
         log.info(f"NERVE event received: {project_id} / {meeting_id}")
